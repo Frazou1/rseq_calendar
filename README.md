@@ -1,4 +1,4 @@
-# Ville_qc_collecte
+# RSEQ
 
 **Ville_qc_collecte** is a Home Assistant add-on that scrapes the [Ville de Québec Info-Collecte website](https://www.ville.quebec.qc.ca/services/info-collecte/) (using Selenium) to determine the next garbage (ordures/résidus alimentaires) and recycling (recyclage) collection dates. The add-on then publishes these dates as MQTT sensors, making them available in Home Assistant.  
 **New features:**  
