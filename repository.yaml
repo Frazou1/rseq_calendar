@@ -1,0 +1,4 @@
+# https://developers.home-assistant.io/docs/add-ons/repository#repository-configuration
+name: Ville Quebec Collecte
+url: 'https://github.com/Frazou1/ville_qc_collecte'
+maintainer: Frazou1
