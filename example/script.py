@@ -2,12 +2,15 @@ import argparse
 import json
 import os
 import time
-from datetime import datetime, date, timedelta
+import re
+from datetime import datetime, timedelta
+from typing import List, Dict, Optional
 
-import requests  # Pour effectuer des requêtes HTTP
+import requests
 import paho.mqtt.client as mqtt
+from bs4 import BeautifulSoup
 
-# Selenium
+# Selenium (site RSEQ rendu côté client)
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -15,116 +18,250 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-from bs4 import BeautifulSoup
-
-# Fichier pour mémoriser l'état des événements créés
 STATE_FILE = "/data/last_events.json"
 
-def load_last_events():
-    """Charge les dernières dates d'événements créés depuis le fichier d'état."""
+# ---------- Utils état (éviter doublons events HA) ----------
+
+def load_last_events() -> Dict:
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 return json.load(f)
         except Exception as e:
-            print(f"[SCRIPT] Erreur lors du chargement de l'état: {e}")
-            return {}
+            print(f"[SCRIPT] Erreur chargement état: {e}")
     return {}
 
-def save_last_events(state):
-    """Enregistre l'état (dates des événements créés) dans le fichier."""
+def save_last_events(state: Dict) -> None:
     try:
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(state, f)
     except Exception as e:
-        print(f"[SCRIPT] Erreur lors de l'enregistrement de l'état: {e}")
+        print(f"[SCRIPT] Erreur sauvegarde état: {e}")
 
-def publish_sensor(client, topic_base, sensor_name, state, attributes=None):
-    """
-    Publie un capteur via MQTT Discovery.
-    """
-    config_topic = f"{topic_base}/{sensor_name}/config"
-    state_topic = f"{topic_base}/{sensor_name}/state"
-    attr_topic = f"{topic_base}/{sensor_name}/attributes"
+# ---------- Publication MQTT (MQTT Discovery) ----------
 
-    device_name = "VilleQCCollecte"
-    unique_id = f"ville_qc_{sensor_name}"
+def mqtt_discovery_publish(client: mqtt.Client, discovery_prefix: str, sensor_id: str,
+                           name: str, device_name: str, icon: str,
+                           state: str, attributes: Optional[Dict] = None) -> None:
+    base = f"{discovery_prefix}/sensor/{sensor_id}"
+    config_topic = f"{base}/config"
+    state_topic = f"{base}/state"
+    attr_topic = f"{base}/attributes"
 
     config_payload = {
-        "name": f"Collecte {sensor_name}",
-        "state_topic": state_topic,
-        "unique_id": unique_id,
-        "device": {
-            "identifiers": ["ville_qc_collecte_device"],
-            "name": device_name,
-            "manufacturer": "Ville de Québec"
-        }
+        "name": name,
+        "uniq_id": sensor_id,
+        "stat_t": state_topic,
+        "json_attr_t": attr_topic,
+        "dev": {"name": device_name, "ids": [device_name]},
+        "icon": icon
     }
+    client.publish(config_topic, json.dumps(config_payload), retain=True, qos=1)
+    if attributes is not None:
+        client.publish(attr_topic, json.dumps(attributes, ensure_ascii=False), retain=True, qos=0)
+    client.publish(state_topic, state, retain=True, qos=0)
 
-    if attributes:
-        config_payload["json_attributes_topic"] = attr_topic
-        client.publish(attr_topic, json.dumps(attributes), retain=True)
+# ---------- Création d’événements HA (optionnelle) ----------
 
-    client.publish(config_topic, json.dumps(config_payload), retain=True)
-    client.publish(state_topic, state, retain=True)
-
-def create_event_in_ha(ha_url, ha_token, ha_calendar_entity, event_date, event_summary, event_description):
+def create_event_in_ha(ha_url: str, ha_token: str, ha_calendar_entity: str,
+                       start_iso: str, end_iso: str,
+                       summary: str, description: str) -> None:
     """
-    Appelle l'API Home Assistant pour créer un événement en appelant le script 'create_calendar_event'.
-    Le script HA doit être configuré pour accepter les variables :
-      - calendar_entity
-      - start_date
-      - end_date
-      - summary
-      - description
-    Ici, nous utilisons le service script.turn_on.
+    Appelle le service script.turn_on de HA, qui doit déclencher ton
+    script `script.create_calendar_event` acceptant:
+    - calendar_entity
+    - start_date
+    - end_date
+    - summary
+    - description
     """
+    if not (ha_url and ha_token and ha_calendar_entity):
+        return
+
     url = f"{ha_url}/api/services/script/turn_on"
-    headers = {
-        "Authorization": f"Bearer {ha_token}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Authorization": f"Bearer {ha_token}", "Content-Type": "application/json"}
     payload = {
         "entity_id": "script.create_calendar_event",
         "variables": {
             "calendar_entity": ha_calendar_entity,
-            "start_date": event_date,
-            "end_date": event_date,
-            "summary": event_summary,
-            "description": event_description,
+            "start_date": start_iso,
+            "end_date": end_iso,
+            "summary": summary,
+            "description": description,
         }
     }
-    response = requests.post(url, headers=headers, json=payload)
-    if response.status_code != 200:
-        raise Exception(f"Erreur lors de la création de l'événement : {response.status_code}: {response.text}")
-    print(f"[SCRIPT] Événement créé dans HA: {event_summary} pour le {event_date}")
+    r = requests.post(url, headers=headers, json=payload, timeout=20)
+    if r.status_code != 200:
+        raise RuntimeError(f"HA event error {r.status_code}: {r.text}")
+
+# ---------- Scraping RSEQ ----------
+
+def build_driver() -> webdriver.Chrome:
+    chrome_options = Options()
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--window-size=1280,2000")
+    # chromedriver est généralement à /usr/bin/chromedriver dans les add-ons base Chromium
+    service = Service("/usr/bin/chromedriver")
+    return webdriver.Chrome(service=service, options=chrome_options)
+
+def parse_datetime_candidates(date_str: str, time_str: str) -> Optional[datetime]:
+    """
+    Accepte plusieurs formats vus sur les sites francophones.
+    Remplace '19h30' -> '19:30' avant parsing.
+    """
+    ds = (date_str or "").strip()
+    ts = (time_str or "").strip().replace("h", ":").replace("H", ":")
+    # Concaténer si heure présente
+    dt_text = f"{ds} {ts}".strip() if ts else ds
+
+    fmts = [
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d",
+        "%d-%m-%Y %H:%M",
+        "%d-%m-%Y",
+        "%d/%m/%Y %H:%M",
+        "%d/%m/%Y",
+        "%Y-%m-%d %H:%M:%S",
+    ]
+    for fmt in fmts:
+        try:
+            return datetime.strptime(dt_text, fmt)
+        except ValueError:
+            continue
+    return None
+
+def extract_calendar_rows(page_html: str) -> List[Dict]:
+    """
+    Repère la section 'Calendrier de l'équipe' puis la table qui suit.
+    Retourne une liste de dicts avec:
+    - datetime (ISO, naive locale)
+    - date, time, visitor, result, home, venue
+    """
+    soup = BeautifulSoup(page_html, "html.parser")
+    title_node = soup.find(string=re.compile(r"Calendrier de l'équipe", re.I))
+    table = None
+    if title_node:
+        parent = title_node.find_parent()
+        if parent:
+            table = parent.find_next("table")
+    if not table:
+        # repli : première table de la page
+        table = soup.find("table")
+    if not table:
+        raise RuntimeError("Table du calendrier introuvable.")
+
+    rows: List[Dict] = []
+    for tr in table.find_all("tr"):
+        tds = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
+        # On s’attend à au moins 7 colonnes: #, Date, Heure, Visiteur, Résultat, Receveur, Endroit
+        if len(tds) < 7:
+            continue
+        # sauter l’entête (contient 'Date' ou '#')
+        headerish = any(h in tds[1].lower() for h in ["date", "jour"])
+        if tds[0] == "#" or headerish:
+            continue
+
+        date_str = tds[1]
+        time_str = tds[2]
+        visitor  = tds[3]
+        result   = tds[4]
+        home     = tds[5]
+        venue    = tds[6]
+
+        dt = parse_datetime_candidates(date_str, time_str)
+        if not dt:
+            # si pas d’heure mais date ok, on force 00:00
+            dt = parse_datetime_candidates(date_str, "")
+        if not dt:
+            continue
+
+        rows.append({
+            "datetime": dt.isoformat(),
+            "date": date_str,
+            "time": time_str,
+            "visitor": visitor,
+            "result": result,
+            "home": home,
+            "venue": venue
+        })
+    return rows
+
+def scrape_team_calendar(team_url: str) -> List[Dict]:
+    driver = build_driver()
+    try:
+        print(f"[SCRIPT] Ouverture: {team_url}")
+        driver.get(team_url)
+
+        # Tenter de cliquer/afficher la section "Calendrier de l'équipe" si c’est un onglet
+        try:
+            el = WebDriverWait(driver, 8).until(
+                EC.presence_of_element_located((By.XPATH, "//*[contains(., \"Calendrier de l'équipe\")]"))
+            )
+            try:
+                el.click()
+                time.sleep(0.5)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # Attendre qu’une table soit présente dans le DOM
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "table")))
+        html = driver.page_source
+        rows = extract_calendar_rows(html)
+        print(f"[SCRIPT] {len(rows)} lignes de calendrier détectées.")
+        return rows
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+
+def find_next_and_upcoming(rows: List[Dict]) -> (Optional[Dict], List[Dict]):
+    now = datetime.now()
+    future = []
+    for r in rows:
+        try:
+            dt = datetime.fromisoformat(r["datetime"])
+            if dt >= now:
+                future.append(r)
+        except Exception:
+            continue
+    future.sort(key=lambda x: x["datetime"])
+    return (future[0] if future else None), future[:5]
+
+# ---------- Main ----------
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--address", required=True)
+    parser.add_argument("--team_url", required=True)
     parser.add_argument("--mqtt_host", default="core-mosquitto")
     parser.add_argument("--mqtt_port", default="1883")
     parser.add_argument("--mqtt_user", default="")
     parser.add_argument("--mqtt_pass", default="")
-    # Nouveaux arguments pour l'intégration HA
+    parser.add_argument("--discovery_prefix", default="homeassistant")
+    # Optionnel: création d’événements dans HA
     parser.add_argument("--ha_url", default="")
     parser.add_argument("--ha_token", default="")
     parser.add_argument("--ha_calendar_entity", default="")
-
     args = parser.parse_args()
-    ADDRESS = args.address
+
+    TEAM_URL = args.team_url
     MQTT_HOST = args.mqtt_host
     MQTT_PORT = int(args.mqtt_port)
     MQTT_USER = args.mqtt_user
     MQTT_PASS = args.mqtt_pass
+    DISCOVERY_PREFIX = args.discovery_prefix
     HA_URL = args.ha_url
     HA_TOKEN = args.ha_token
     HA_CALENDAR_ENTITY = args.ha_calendar_entity
 
-    print(f"[SCRIPT] Démarrage avec adresse={ADDRESS}")
+    print(f"[SCRIPT] Démarrage RSEQ avec team_url={TEAM_URL}")
 
     # Connexion MQTT
-    client = mqtt.Client()
+    client = mqtt.Client(client_id="rseq_team_calendar")
     if MQTT_USER:
         client.username_pw_set(MQTT_USER, MQTT_PASS)
 
@@ -133,163 +270,72 @@ def main():
         client.loop_start()
         print("[SCRIPT] Connecté à MQTT.")
     except Exception as e:
-        print(f"[ERREUR] Impossible de se connecter à MQTT: {e}")
+        print(f"[ERREUR] MQTT: {e}")
         return
 
     status = "success"
-    ordures_dates = []
-    recyclage_dates = []
-    today = date.today()
+    next_game = None
+    upcoming: List[Dict] = []
 
     try:
-        # Selenium en mode headless
-        chrome_options = Options()
-        chrome_options.add_argument("--headless")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--no-sandbox")
-        service = Service("/usr/bin/chromedriver")
-
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-        url_main = "https://www.ville.quebec.qc.ca/services/info-collecte/"
-        print(f"[SCRIPT] Accès: {url_main}")
-        driver.get(url_main)
-
-        # Remplir le champ d'adresse
-        field = WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((
-                By.NAME,
-                "ctl00$ctl00$contenu$texte_page$ucInfoCollecteRechercheAdresse$RechercheAdresse$txtNomRue"
-            ))
-        )
-        field.clear()
-        field.send_keys(ADDRESS)
-
-        # Cliquer sur le bouton de recherche
-        search_button = driver.find_element(
-            By.NAME,
-            "ctl00$ctl00$contenu$texte_page$ucInfoCollecteRechercheAdresse$RechercheAdresse$BtnRue"
-        )
-        search_button.click()
-
-        # Attendre le calendrier
-        WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "table.calendrier"))
-        )
-        print("[SCRIPT] Calendrier détecté.")
-
-        soup = BeautifulSoup(driver.page_source, "html.parser")
-        tables = soup.find_all("table", class_="calendrier")
-        if not tables:
-            raise RuntimeError("Aucune table 'calendrier' trouvée !")
-
-        # Mapping de mois (en minuscule) -> numéro
-        months_map = {
-            "janvier": 1, "février": 2, "fevrier": 2, "mars": 3,
-            "avril": 4, "mai": 5, "juin": 6, "juillet": 7,
-            "aout": 8, "août": 8, "septembre": 9, "octobre": 10,
-            "novembre": 11, "décembre": 12
-        }
-
-        for table in tables:
-            caption = table.find("caption")
-            caption_txt = caption.get_text(strip=True).lower() if caption else ""
-            parts = caption_txt.split()
-            if len(parts) >= 2:
-                month_str = parts[0]
-                year_str = parts[1]
-                month_num = months_map.get(month_str, 0)
-                year_num = int(year_str) if year_str.isdigit() else today.year
-            else:
-                month_num = 0
-                year_num = today.year
-
-            for td in table.find_all("td"):
-                date_p = td.find("p", class_="date")
-                if not date_p:
-                    continue
-                day_str = date_p.get_text(strip=True)
-                if not day_str.isdigit():
-                    continue
-                day_num = int(day_str)
-                try:
-                    dt = datetime(year_num, month_num, day_num).date()
-                except:
-                    continue
-
-                # Traitement de toutes les icônes présentes (ordures et/ou recyclage)
-                for img in td.select("p.img img"):
-                    alt = img.get("alt", "").lower()
-                    if "ordures" in alt:
-                        ordures_dates.append(dt)
-                    if "recyclage" in alt:
-                        recyclage_dates.append(dt)
-
-        if not ordures_dates and not recyclage_dates:
-            raise ValueError("Aucune collecte trouvée pour l'adresse donnée.")
-
-        def next_future(dates):
-            fut = [d for d in dates if d >= today]
-            return min(fut) if fut else None
-
-        next_ordures = next_future(ordures_dates)
-        next_recyclage = next_future(recyclage_dates)
-        str_ordures = next_ordures.isoformat() if next_ordures else "N/A"
-        str_recyclage = next_recyclage.isoformat() if next_recyclage else "N/A"
-        print(f"[SCRIPT] Prochaine ordures = {str_ordures}, recyclage = {str_recyclage}")
+        rows = scrape_team_calendar(TEAM_URL)
+        ng, up = find_next_and_upcoming(rows)
+        next_game = ng
+        upcoming = up
+        if not rows:
+            status = "error: calendrier vide"
     except Exception as e:
         status = f"error: {e}"
-        print(f"[SCRIPT] ÉRREUR: {e}")
-    finally:
+        print(f"[SCRIPT] ERREUR: {e}")
+
+    # Création éventuelle d’un event HA (si next_game)
+    if next_game and HA_URL and HA_TOKEN and HA_CALENDAR_ENTITY:
+        last = load_last_events()
+        ng_key = next_game.get("datetime")
         try:
-            driver.quit()
-        except:
-            pass
-
-    # Gestion de l'état pour éviter les doublons
-    last_events = load_last_events()
-
-    if HA_URL and HA_TOKEN and HA_CALENDAR_ENTITY and status == "success":
-        if next_ordures:
-            if last_events.get("ordures") != next_ordures.isoformat():
+            if last.get("last_next_game") != ng_key:
+                # Construire un résumé/description
+                summary = f"{next_game['visitor']} @ {next_game['home']} (RSEQ)"
+                # Utiliser datetime ISO (naive) pour start/end (même jour si pas d'heure précise)
+                start_iso = next_game["datetime"]
+                # End = +2h par défaut
                 try:
-                    create_event_in_ha(HA_URL, HA_TOKEN, HA_CALENDAR_ENTITY,
-                                       next_ordures.isoformat(),
-                                       "Collecte ordures",
-                                       f"Prochaine collecte d'ordures prévue le {next_ordures.isoformat()}")
-                    last_events["ordures"] = next_ordures.isoformat()
-                except Exception as e:
-                    print(f"Erreur lors de la création de l'événement d'ordures: {e}")
+                    dt_start = datetime.fromisoformat(start_iso)
+                    dt_end = (dt_start + timedelta(hours=2)).isoformat()
+                except Exception:
+                    dt_end = start_iso
+                description = f"Endroit: {next_game.get('venue','-')} | Résultat: {next_game.get('result','')}"
+                create_event_in_ha(HA_URL, HA_TOKEN, HA_CALENDAR_ENTITY, start_iso, dt_end, summary, description)
+                last["last_next_game"] = ng_key
+                save_last_events(last)
             else:
-                print("[SCRIPT] L'événement d'ordures est déjà à jour.")
-        if next_recyclage:
-            if last_events.get("recyclage") != next_recyclage.isoformat():
-                try:
-                    create_event_in_ha(HA_URL, HA_TOKEN, HA_CALENDAR_ENTITY,
-                                       next_recyclage.isoformat(),
-                                       "Collecte recyclage",
-                                       f"Prochaine collecte de recyclage prévue le {next_recyclage.isoformat()}")
-                    last_events["recyclage"] = next_recyclage.isoformat()
-                except Exception as e:
-                    print(f"Erreur lors de la création de l'événement de recyclage: {e}")
-            else:
-                print("[SCRIPT] L'événement de recyclage est déjà à jour.")
-        save_last_events(last_events)
+                print("[SCRIPT] Événement HA déjà créé pour ce prochain match.")
+        except Exception as e:
+            print(f"[SCRIPT] Erreur création événement HA: {e}")
 
-    # Publication MQTT des capteurs
-    topic_base = "homeassistant/sensor/ville_qc_collecte"
-    publish_sensor(client, topic_base, "status", state=status, attributes={})
-    if status.startswith("error"):
-        publish_sensor(client, topic_base, "ordures", "error", attributes={})
+    # Publication MQTT des sensors
+    device_name = "RSEQ Team Calendar"
+    # 1) status
+    mqtt_discovery_publish(
+        client, DISCOVERY_PREFIX, "rseq_team_status",
+        "RSEQ – Status", device_name, "mdi:information",
+        status, {}
+    )
+    # 2) prochain match
+    if next_game:
+        state_str = f"{next_game['date']} {next_game['time']} – {next_game['visitor']} @ {next_game['home']}"
     else:
-        publish_sensor(client, topic_base, "ordures", str_ordures, attributes={
-            "all_dates": [d.isoformat() for d in sorted(ordures_dates)]
-        })
-    if status.startswith("error"):
-        publish_sensor(client, topic_base, "recyclage", "error", attributes={})
-    else:
-        publish_sensor(client, topic_base, "recyclage", str_recyclage, attributes={
-            "all_dates": [d.isoformat() for d in sorted(recyclage_dates)]
-        })
+        state_str = "Aucun match à venir"
+    attributes = {
+        "next_game": next_game,
+        "upcoming": upcoming,
+        "updated": datetime.now().isoformat()
+    }
+    mqtt_discovery_publish(
+        client, DISCOVERY_PREFIX, "rseq_team_next_game",
+        "RSEQ – Prochain match (équipe)", device_name, "mdi:calendar-account",
+        state_str, attributes
+    )
 
     client.loop_stop()
     client.disconnect()
