@@ -113,7 +113,6 @@ def parse_datetime_candidates(date_str: str, time_str: str) -> Optional[datetime
     """
     ds = (date_str or "").strip()
     ts = (time_str or "").strip().replace("h", ":").replace("H", ":")
-    # Concaténer si heure présente
     dt_text = f"{ds} {ts}".strip() if ts else ds
 
     fmts = [
@@ -134,58 +133,48 @@ def parse_datetime_candidates(date_str: str, time_str: str) -> Optional[datetime
 
 def extract_calendar_rows(page_html: str) -> List[Dict]:
     """
-    Repère la section 'Calendrier de l'équipe' puis la table qui suit.
-    Retourne une liste de dicts avec:
-    - datetime (ISO, naive locale)
-    - date, time, visitor, result, home, venue
+    Cible la table #CalendarTable et lit chaque <tr> du <tbody data-bind="foreach: TeamGames">.
+    Colonnes (indexées depuis 0) observées:
+      0: (blank) | 1: # | 2: Jour | 3: Date | 4: Heure | 5: Visiteur | 6: Résultat
+      7: Receveur | 8: (map link) | 9: Endroit
     """
     soup = BeautifulSoup(page_html, "html.parser")
-    title_node = soup.find(string=re.compile(r"Calendrier de l'équipe", re.I))
-    table = None
-    if title_node:
-        parent = title_node.find_parent()
-        if parent:
-            table = parent.find_next("table")
+    table = soup.find("table", {"id": "CalendarTable"})
     if not table:
-        # repli : première table de la page
-        table = soup.find("table")
-    if not table:
-        raise RuntimeError("Table du calendrier introuvable.")
+        raise RuntimeError("Table #CalendarTable non trouvée")
 
     rows: List[Dict] = []
-    for tr in table.find_all("tr"):
-        tds = [td.get_text(strip=True) for td in tr.find_all(["td", "th"])]
-        # On s’attend à au moins 7 colonnes: #, Date, Heure, Visiteur, Résultat, Receveur, Endroit
-        if len(tds) < 7:
-            continue
-        # sauter l’entête (contient 'Date' ou '#')
-        headerish = any(h in tds[1].lower() for h in ["date", "jour"])
-        if tds[0] == "#" or headerish:
+    for tr in table.select("tbody tr"):
+        tds = [td.get_text(strip=True) for td in tr.find_all("td")]
+        if len(tds) < 10:
             continue
 
-        date_str = tds[1]
-        time_str = tds[2]
-        visitor  = tds[3]
-        result   = tds[4]
-        home     = tds[5]
-        venue    = tds[6]
+        # Extraction selon la structure confirmée
+        no = tds[1]
+        jour = tds[2]
+        date_str = tds[3]
+        time_str = tds[4]
+        visitor = tds[5]
+        result  = tds[6]
+        home    = tds[7]
+        venue   = tds[9]
 
-        dt = parse_datetime_candidates(date_str, time_str)
-        if not dt:
-            # si pas d’heure mais date ok, on force 00:00
-            dt = parse_datetime_candidates(date_str, "")
-        if not dt:
-            continue
+        # Date/heure -> datetime ISO (si possible)
+        dt = parse_datetime_candidates(date_str, time_str) or parse_datetime_candidates(date_str, "")
+        dt_iso = dt.isoformat() if dt else None
 
         rows.append({
-            "datetime": dt.isoformat(),
+            "no": no,
+            "jour": jour,
             "date": date_str,
             "time": time_str,
+            "datetime": dt_iso,
             "visitor": visitor,
             "result": result,
             "home": home,
             "venue": venue
         })
+
     return rows
 
 def scrape_team_calendar(team_url: str) -> List[Dict]:
@@ -194,23 +183,28 @@ def scrape_team_calendar(team_url: str) -> List[Dict]:
         print(f"[SCRIPT] Ouverture: {team_url}")
         driver.get(team_url)
 
-        # Tenter de cliquer/afficher la section "Calendrier de l'équipe" si c’est un onglet
-        try:
-            el = WebDriverWait(driver, 8).until(
-                EC.presence_of_element_located((By.XPATH, "//*[contains(., \"Calendrier de l'équipe\")]"))
-            )
-            try:
-                el.click()
-                time.sleep(0.5)
-            except Exception:
-                pass
-        except Exception:
-            pass
+        # Attendre explicitement la table #CalendarTable
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.ID, "CalendarTable"))
+        )
+        # Attendre qu'il y ait au moins une ligne de <tbody>
+        WebDriverWait(driver, 15).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, "#CalendarTable tbody tr"))
+        )
 
-        # Attendre qu’une table soit présente dans le DOM
-        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "table")))
         html = driver.page_source
         rows = extract_calendar_rows(html)
+
+        if not rows:
+            # Dump HTML pour debug si jamais
+            try:
+                os.makedirs("/share", exist_ok=True)
+                with open("/share/rseq_last.html", "w", encoding="utf-8") as f:
+                    f.write(html)
+                print("[SCRIPT] Aucune ligne trouvée — snapshot /share/rseq_last.html écrit.")
+            except Exception as e:
+                print(f"[SCRIPT] Dump HTML impossible: {e}")
+
         print(f"[SCRIPT] {len(rows)} lignes de calendrier détectées.")
         return rows
     finally:
@@ -224,7 +218,10 @@ def find_next_and_upcoming(rows: List[Dict]) -> (Optional[Dict], List[Dict]):
     future = []
     for r in rows:
         try:
-            dt = datetime.fromisoformat(r["datetime"])
+            dt_iso = r.get("datetime")
+            if not dt_iso:
+                continue
+            dt = datetime.fromisoformat(dt_iso)
             if dt >= now:
                 future.append(r)
         except Exception:
@@ -294,11 +291,8 @@ def main():
         ng_key = next_game.get("datetime")
         try:
             if last.get("last_next_game") != ng_key:
-                # Construire un résumé/description
                 summary = f"{next_game['visitor']} @ {next_game['home']} (RSEQ)"
-                # Utiliser datetime ISO (naive) pour start/end (même jour si pas d'heure précise)
                 start_iso = next_game["datetime"]
-                # End = +2h par défaut
                 try:
                     dt_start = datetime.fromisoformat(start_iso)
                     dt_end = (dt_start + timedelta(hours=2)).isoformat()
