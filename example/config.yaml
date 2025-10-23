@@ -1,9 +1,9 @@
 # https://developers.home-assistant.io/docs/add-ons/configuration#add-on-config
-name: Ville Quebec Collecte Add-on
-version: "1.3.1"
+name: RSEQ Calendrier Add-on
+version: "1.1.0"
 slug: example
-description: Ville Quebec Collecte Add-on
-url: "https://github.com/Frazou1/ville_qc_collecte"
+description: RSEQ Calendrier Add-on
+url: "https://github.com/Frazou1/rseq_calendar"
 arch:
   - armhf
   - armv7
@@ -14,7 +14,7 @@ init: false
 map:
   - share:rw
 options:
-  address: "123 des tulippes"
+  team_url: "https://diffusion.rseq.ca/Default?Type=Team&TeamId=3a82359e-d32c-43b2-ba3b-5d942d5d2c5f"
   update_interval: 3600
   mqtt_host: "core-mosquitto"
   mqtt_port: 1883
@@ -23,7 +23,7 @@ options:
   # Options pour l'intégration Home Assistant
   ha_url: "http://homeassistant.local:8123"
   ha_token: ""            # Remplis avec ton jeton d'accès à long terme
-  ha_calendar_entity: "calendar.mon_calendrier"  # Entité du calendrier dans HA
+  ha_calendar_entity: "calendar.rseq_equipes"  # Entité du calendrier dans HA
 schema:
   address: str
   update_interval: int
