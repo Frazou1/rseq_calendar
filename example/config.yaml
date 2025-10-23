@@ -1,8 +1,8 @@
 # https://developers.home-assistant.io/docs/add-ons/configuration#add-on-config
-name: RSEQ Calendrier Add-on
+name: RSEQ Team Calendar
 version: "1.1.0"
-slug: example
-description: RSEQ Calendrier Add-on
+slug: rseq_team_calendar
+description: "Scrape le calendrier RSEQ d’une équipe et publie le prochain match dans un sensor via MQTT (optionnel: création d’événements HA)."
 url: "https://github.com/Frazou1/rseq_calendar"
 arch:
   - armhf
@@ -13,27 +13,34 @@ arch:
 init: false
 map:
   - share:rw
+
 options:
   team_url: "https://diffusion.rseq.ca/Default?Type=Team&TeamId=3a82359e-d32c-43b2-ba3b-5d942d5d2c5f"
   update_interval: 3600
+
   mqtt_host: "core-mosquitto"
   mqtt_port: 1883
   mqtt_username: "monuser"
   mqtt_password: "monpassword"
-  # Options pour l'intégration Home Assistant
+  discovery_prefix: "homeassistant"
+
+  # (Optionnel) création d'événements dans HA
   ha_url: "http://homeassistant.local:8123"
-  ha_token: ""            # Remplis avec ton jeton d'accès à long terme
-  ha_calendar_entity: "calendar.rseq_equipes"  # Entité du calendrier dans HA
+  ha_token: ""                  # Jeton d'accès longue durée (ou vide si inutilisé)
+  ha_calendar_entity: "calendar.rseq_equipes"
+
 schema:
-  address: str
+  team_url: str
   update_interval: int
   mqtt_host: str
   mqtt_port: int
   mqtt_username: str
   mqtt_password: str
+  discovery_prefix: str
   ha_url: str
   ha_token: str
   ha_calendar_entity: str
+
 build:
   builder: docker
   file: Dockerfile
