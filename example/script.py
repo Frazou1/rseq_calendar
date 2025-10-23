@@ -101,8 +101,12 @@ def build_driver() -> webdriver.Chrome:
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--disable-dev-shm-usage")
     chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--window-size=1280,2000")
-    # chromedriver est généralement à /usr/bin/chromedriver dans les add-ons base Chromium
+    chrome_options.add_argument("--window-size=1366,2400")
+    chrome_options.add_argument("--lang=fr-CA")
+    chrome_options.add_argument(
+        "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36"
+    )
     service = Service("/usr/bin/chromedriver")
     return webdriver.Chrome(service=service, options=chrome_options)
 
@@ -146,10 +150,9 @@ def extract_calendar_rows(page_html: str) -> List[Dict]:
     rows: List[Dict] = []
     for tr in table.select("tbody tr"):
         tds = [td.get_text(strip=True) for td in tr.find_all("td")]
-        if len(tds) < 10:
+        if len(tds) < 9:  # parfois pas de cellule 'mapLink' -> 9 cellules
             continue
 
-        # Extraction selon la structure confirmée
         no = tds[1]
         jour = tds[2]
         date_str = tds[3]
@@ -157,9 +160,9 @@ def extract_calendar_rows(page_html: str) -> List[Dict]:
         visitor = tds[5]
         result  = tds[6]
         home    = tds[7]
-        venue   = tds[9]
+        # Endroit peut être en index 9 (avec lien carte) ou 8 (sans lien)
+        venue   = tds[9] if len(tds) >= 10 else tds[8]
 
-        # Date/heure -> datetime ISO (si possible)
         dt = parse_datetime_candidates(date_str, time_str) or parse_datetime_candidates(date_str, "")
         dt_iso = dt.isoformat() if dt else None
 
@@ -183,15 +186,31 @@ def scrape_team_calendar(team_url: str) -> List[Dict]:
         print(f"[SCRIPT] Ouverture: {team_url}")
         driver.get(team_url)
 
-        # Attendre explicitement la table #CalendarTable
-        WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.ID, "CalendarTable"))
-        )
-        # Attendre qu'il y ait au moins une ligne de <tbody>
-        WebDriverWait(driver, 15).until(
-            EC.presence_of_element_located((By.CSS_SELECTOR, "#CalendarTable tbody tr"))
-        )
+        # Attendre la présence de la section puis scroller dessus (certaines liaisons JS se font au viewport)
+        try:
+            section = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.ID, "ScheduleSection"))
+            )
+            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", section)
+            time.sleep(0.4)
+        except Exception:
+            pass
 
+        # Attendre explicitement la table et au moins 5 lignes
+        WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, "CalendarTable")))
+        # Boucle d'attente jusqu'à >= 5 lignes dans tbody (chargement KO/async)
+        max_rows = 0
+        for _ in range(30):  # ~15s
+            rows_now = driver.find_elements(By.CSS_SELECTOR, "#CalendarTable tbody tr")
+            max_rows = max(max_rows, len(rows_now))
+            if len(rows_now) >= 5:
+                break
+            time.sleep(0.5)
+
+        print(f"[SCRIPT] Debug: {max_rows} tr détectés dans #CalendarTable (au plus).")
+
+        # Petite marge de sécurité
+        time.sleep(0.3)
         html = driver.page_source
         rows = extract_calendar_rows(html)
 
@@ -201,7 +220,7 @@ def scrape_team_calendar(team_url: str) -> List[Dict]:
                 os.makedirs("/share", exist_ok=True)
                 with open("/share/rseq_last.html", "w", encoding="utf-8") as f:
                     f.write(html)
-                print("[SCRIPT] Aucune ligne trouvée — snapshot /share/rseq_last.html écrit.")
+                print("[SCRIPT] Aucune ligne parsée — snapshot /share/rseq_last.html écrit.")
             except Exception as e:
                 print(f"[SCRIPT] Dump HTML impossible: {e}")
 
