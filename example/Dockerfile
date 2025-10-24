@@ -24,13 +24,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Variables d'environnement utiles à Selenium/Chromium ---
-# Tu peux lire ces flags dans ton script Selenium (ou les appliquer par défaut).
 ENV CHROME_BIN=/usr/bin/chromium \
     CHROMEDRIVER=/usr/bin/chromedriver \
     CHROMIUM_FLAGS="--headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu --window-size=1920,1080"
 
 # --- Dépendances Python ---
-# (Pins souples pour limiter les régressions tout en restant 4.x pour Selenium)
 RUN pip install --no-cache-dir \
     "selenium==4.*" \
     "webdriver-manager==4.*" \
@@ -38,14 +36,12 @@ RUN pip install --no-cache-dir \
     "paho-mqtt==1.6.1" \
     "requests>=2.31,<3"
 
-# --- Utilisateur non-root (meilleure pratique pour Chrome headless) ---
-RUN useradd -ms /bin/bash appuser
+# --- Répertoire de travail ---
 WORKDIR /app
-USER appuser
 
 # --- Copie des fichiers de l’add-on ---
-COPY --chown=appuser:appuser run.sh /run.sh
-COPY --chown=appuser:appuser script.py /script.py
+COPY run.sh /run.sh
+COPY script.py /script.py
 RUN chmod a+x /run.sh
 
 # Si tu veux, tu peux ajouter un HEALTHCHECK plus tard (exige curl/wget)
