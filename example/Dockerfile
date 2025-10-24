@@ -1,5 +1,15 @@
 FROM python:3.11-slim
 
+# --- Optimisations Python ---
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+# --- Timezone (pour éviter les surprises de décalage) ---
+ENV TZ=America/Toronto
+RUN apt-get update && apt-get install -y --no-install-recommends tzdata && \
+    ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# --- Dépendances système pour Chromium/Selenium ---
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     chromium-driver \
@@ -10,13 +20,35 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgbm-dev \
     libasound2 \
     jq \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Installer les packages Python nécessaires (ajout de "requests")
-RUN pip install --no-cache-dir selenium==4.* webdriver-manager==4.* beautifulsoup4 paho-mqtt==1.6.1 requests
+# --- Variables d'environnement utiles à Selenium/Chromium ---
+# Tu peux lire ces flags dans ton script Selenium (ou les appliquer par défaut).
+ENV CHROME_BIN=/usr/bin/chromium \
+    CHROMEDRIVER=/usr/bin/chromedriver \
+    CHROMIUM_FLAGS="--headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu --window-size=1920,1080"
 
-COPY run.sh /run.sh
-COPY script.py /script.py
+# --- Dépendances Python ---
+# (Pins souples pour limiter les régressions tout en restant 4.x pour Selenium)
+RUN pip install --no-cache-dir \
+    "selenium==4.*" \
+    "webdriver-manager==4.*" \
+    "beautifulsoup4>=4.12,<5" \
+    "paho-mqtt==1.6.1" \
+    "requests>=2.31,<3"
 
+# --- Utilisateur non-root (meilleure pratique pour Chrome headless) ---
+RUN useradd -ms /bin/bash appuser
+WORKDIR /app
+USER appuser
+
+# --- Copie des fichiers de l’add-on ---
+COPY --chown=appuser:appuser run.sh /run.sh
+COPY --chown=appuser:appuser script.py /script.py
 RUN chmod a+x /run.sh
+
+# Si tu veux, tu peux ajouter un HEALTHCHECK plus tard (exige curl/wget)
+# HEALTHCHECK --interval=1m --timeout=5s CMD python /app/healthcheck.py || exit 1
+
 CMD [ "/run.sh" ]
