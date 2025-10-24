@@ -4,7 +4,7 @@ import os
 import time
 import re
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
 import requests
 import paho.mqtt.client as mqtt
@@ -19,8 +19,40 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 STATE_FILE = "/data/last_events.json"
+LOCAL_TZ = "America/Toronto"
 
-# ---------- Utils état (éviter doublons events HA) ----------
+# ---------- Utils ----------
+
+def slugify(name: str) -> str:
+    import unicodedata
+    value = unicodedata.normalize("NFKD", name).encode("ascii", "ignore").decode("ascii")
+    value = re.sub(r"[^a-zA-Z0-9]+", "_", value).strip("_").lower()
+    return value or "rseq"
+
+def to_local_iso(dt: Optional[datetime]) -> Optional[str]:
+    if dt is None:
+        return None
+    try:
+        import pytz
+        tz = pytz.timezone(LOCAL_TZ)
+        if dt.tzinfo is None:
+            dt = tz.localize(dt)
+        else:
+            dt = dt.astimezone(tz)
+        return dt.isoformat()
+    except Exception:
+        # Fallback: ISO naive
+        return dt.isoformat()
+
+def now_local() -> datetime:
+    try:
+        import pytz
+        tz = pytz.timezone(LOCAL_TZ)
+        return datetime.now(tz)
+    except Exception:
+        return datetime.now()
+
+# ---------- Persistance anti-doublons (événements HA) ----------
 
 def load_last_events() -> Dict:
     if os.path.exists(STATE_FILE):
@@ -38,7 +70,7 @@ def save_last_events(state: Dict) -> None:
     except Exception as e:
         print(f"[SCRIPT] Erreur sauvegarde état: {e}")
 
-# ---------- Publication MQTT (MQTT Discovery) ----------
+# ---------- MQTT (Discovery) ----------
 
 def mqtt_discovery_publish(client: mqtt.Client, discovery_prefix: str, sensor_id: str,
                            name: str, device_name: str, icon: str,
@@ -66,15 +98,6 @@ def mqtt_discovery_publish(client: mqtt.Client, discovery_prefix: str, sensor_id
 def create_event_in_ha(ha_url: str, ha_token: str, ha_calendar_entity: str,
                        start_iso: str, end_iso: str,
                        summary: str, description: str) -> None:
-    """
-    Appelle le service script.turn_on de HA, qui doit déclencher ton
-    script `script.create_calendar_event` acceptant:
-    - calendar_entity
-    - start_date
-    - end_date
-    - summary
-    - description
-    """
     if not (ha_url and ha_token and ha_calendar_entity):
         return
 
@@ -98,10 +121,17 @@ def create_event_in_ha(ha_url: str, ha_token: str, ha_calendar_entity: str,
 
 def build_driver() -> webdriver.Chrome:
     chrome_options = Options()
-    chrome_options.add_argument("--headless=new")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--window-size=1366,2400")
+    # Flags depuis l'env (Dockerfile exporte CHROMIUM_FLAGS)
+    env_flags = os.getenv("CHROMIUM_FLAGS", "")
+    if env_flags:
+        for flag in env_flags.split():
+            chrome_options.add_argument(flag)
+    else:
+        chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--window-size=1366,2400")
+
     chrome_options.add_argument("--lang=fr-CA")
     chrome_options.add_argument(
         "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -111,12 +141,13 @@ def build_driver() -> webdriver.Chrome:
     return webdriver.Chrome(service=service, options=chrome_options)
 
 def parse_datetime_candidates(date_str: str, time_str: str) -> Optional[datetime]:
-    """
-    Accepte plusieurs formats vus sur les sites francophones.
-    Remplace '19h30' -> '19:30' avant parsing.
-    """
     ds = (date_str or "").strip()
     ts = (time_str or "").strip().replace("h", ":").replace("H", ":")
+
+    # Normaliser cas "19h" => "19:00"
+    if ts and re.fullmatch(r"^\d{1,2}$", ts):
+        ts = f"{ts}:00"
+
     dt_text = f"{ds} {ts}".strip() if ts else ds
 
     fmts = [
@@ -137,8 +168,7 @@ def parse_datetime_candidates(date_str: str, time_str: str) -> Optional[datetime
 
 def extract_calendar_rows(page_html: str) -> List[Dict]:
     """
-    Cible la table #CalendarTable et lit chaque <tr> du <tbody data-bind="foreach: TeamGames">.
-    Colonnes (indexées depuis 0) observées:
+    Table #CalendarTable ; colonnes typiques:
       0: (blank) | 1: # | 2: Jour | 3: Date | 4: Heure | 5: Visiteur | 6: Résultat
       7: Receveur | 8: (map link) | 9: Endroit
     """
@@ -150,7 +180,7 @@ def extract_calendar_rows(page_html: str) -> List[Dict]:
     rows: List[Dict] = []
     for tr in table.select("tbody tr"):
         tds = [td.get_text(strip=True) for td in tr.find_all("td")]
-        if len(tds) < 9:  # parfois pas de cellule 'mapLink' -> 9 cellules
+        if len(tds) < 9:
             continue
 
         no = tds[1]
@@ -160,18 +190,17 @@ def extract_calendar_rows(page_html: str) -> List[Dict]:
         visitor = tds[5]
         result  = tds[6]
         home    = tds[7]
-        # Endroit peut être en index 9 (avec lien carte) ou 8 (sans lien)
         venue   = tds[9] if len(tds) >= 10 else tds[8]
 
         dt = parse_datetime_candidates(date_str, time_str) or parse_datetime_candidates(date_str, "")
-        dt_iso = dt.isoformat() if dt else None
+        dt_iso = to_local_iso(dt) if dt else None
 
         rows.append({
             "no": no,
             "jour": jour,
             "date": date_str,
             "time": time_str,
-            "datetime": dt_iso,
+            "datetime": dt_iso,   # ISO local avec offset si possible
             "visitor": visitor,
             "result": result,
             "home": home,
@@ -180,60 +209,49 @@ def extract_calendar_rows(page_html: str) -> List[Dict]:
 
     return rows
 
-def scrape_team_calendar(team_url: str) -> List[Dict]:
-    driver = build_driver()
+def scrape_team_calendar(team_url: str, driver: webdriver.Chrome) -> List[Dict]:
+    print(f"[SCRIPT] Ouverture: {team_url}")
+    driver.get(team_url)
+
+    # Attente section / table
     try:
-        print(f"[SCRIPT] Ouverture: {team_url}")
-        driver.get(team_url)
+        section = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, "ScheduleSection"))
+        )
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", section)
+        time.sleep(0.4)
+    except Exception:
+        pass
 
-        # Attendre la présence de la section puis scroller dessus (certaines liaisons JS se font au viewport)
+    WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, "CalendarTable")))
+
+    max_rows = 0
+    for _ in range(30):
+        rows_now = driver.find_elements(By.CSS_SELECTOR, "#CalendarTable tbody tr")
+        max_rows = max(max_rows, len(rows_now))
+        if len(rows_now) >= 5:
+            break
+        time.sleep(0.5)
+
+    print(f"[SCRIPT] Debug: {max_rows} tr détectés dans #CalendarTable (au plus).")
+    time.sleep(0.3)
+    html = driver.page_source
+    rows = extract_calendar_rows(html)
+
+    if not rows:
         try:
-            section = WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.ID, "ScheduleSection"))
-            )
-            driver.execute_script("arguments[0].scrollIntoView({block:'center'});", section)
-            time.sleep(0.4)
-        except Exception:
-            pass
+            os.makedirs("/share", exist_ok=True)
+            with open("/share/rseq_last.html", "w", encoding="utf-8") as f:
+                f.write(html)
+            print("[SCRIPT] Aucune ligne parsée — snapshot /share/rseq_last.html écrit.")
+        except Exception as e:
+            print(f"[SCRIPT] Dump HTML impossible: {e}")
 
-        # Attendre explicitement la table et au moins 5 lignes
-        WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, "CalendarTable")))
-        # Boucle d'attente jusqu'à >= 5 lignes dans tbody (chargement KO/async)
-        max_rows = 0
-        for _ in range(30):  # ~15s
-            rows_now = driver.find_elements(By.CSS_SELECTOR, "#CalendarTable tbody tr")
-            max_rows = max(max_rows, len(rows_now))
-            if len(rows_now) >= 5:
-                break
-            time.sleep(0.5)
+    print(f"[SCRIPT] {len(rows)} lignes de calendrier détectées.")
+    return rows
 
-        print(f"[SCRIPT] Debug: {max_rows} tr détectés dans #CalendarTable (au plus).")
-
-        # Petite marge de sécurité
-        time.sleep(0.3)
-        html = driver.page_source
-        rows = extract_calendar_rows(html)
-
-        if not rows:
-            # Dump HTML pour debug si jamais
-            try:
-                os.makedirs("/share", exist_ok=True)
-                with open("/share/rseq_last.html", "w", encoding="utf-8") as f:
-                    f.write(html)
-                print("[SCRIPT] Aucune ligne parsée — snapshot /share/rseq_last.html écrit.")
-            except Exception as e:
-                print(f"[SCRIPT] Dump HTML impossible: {e}")
-
-        print(f"[SCRIPT] {len(rows)} lignes de calendrier détectées.")
-        return rows
-    finally:
-        try:
-            driver.quit()
-        except Exception:
-            pass
-
-def find_next_and_upcoming(rows: List[Dict]) -> (Optional[Dict], List[Dict]):
-    now = datetime.now()
+def find_next_and_upcoming(rows: List[Dict]) -> Tuple[Optional[Dict], List[Dict]]:
+    now = now_local()
     future = []
     for r in rows:
         try:
@@ -241,6 +259,9 @@ def find_next_and_upcoming(rows: List[Dict]) -> (Optional[Dict], List[Dict]):
             if not dt_iso:
                 continue
             dt = datetime.fromisoformat(dt_iso)
+            # Si ISO sans tz : considérer local
+            if dt.tzinfo is None:
+                dt = now.tzinfo.localize(dt) if hasattr(now.tzinfo, "localize") else dt
             if dt >= now:
                 future.append(r)
         except Exception:
@@ -248,23 +269,44 @@ def find_next_and_upcoming(rows: List[Dict]) -> (Optional[Dict], List[Dict]):
     future.sort(key=lambda x: x["datetime"])
     return (future[0] if future else None), future[:5]
 
-# ---------- Main ----------
+# ---------- Main (multi-équipes) ----------
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--team_url", required=True)
+    # Nouveau: multi-équipes via JSON compact
+    parser.add_argument("--teams-json", default="")
+    parser.add_argument("--entity_prefix", default="rseq")
+
+    # Compat legacy
+    parser.add_argument("--team_url", default="")
+
+    # MQTT / HA
     parser.add_argument("--mqtt_host", default="core-mosquitto")
     parser.add_argument("--mqtt_port", default="1883")
     parser.add_argument("--mqtt_user", default="")
     parser.add_argument("--mqtt_pass", default="")
     parser.add_argument("--discovery_prefix", default="homeassistant")
-    # Optionnel: création d’événements dans HA
     parser.add_argument("--ha_url", default="")
     parser.add_argument("--ha_token", default="")
     parser.add_argument("--ha_calendar_entity", default="")
     args = parser.parse_args()
 
-    TEAM_URL = args.team_url
+    # Teams à traiter
+    teams: List[Dict[str, str]] = []
+    if args.teams_json:
+        try:
+            teams = json.loads(args.teams_json)
+        except Exception as e:
+            print(f"[ERREUR] teams-json invalide: {e}")
+            teams = []
+    elif args.team_url:
+        teams = [{"name": "default", "team_url": args.team_url}]
+    else:
+        print("[ERREUR] Aucune équipe fournie (teams-json ou team_url).")
+        return
+
+    entity_prefix = args.entity_prefix.strip() or "rseq"
+
     MQTT_HOST = args.mqtt_host
     MQTT_PORT = int(args.mqtt_port)
     MQTT_USER = args.mqtt_user
@@ -274,13 +316,10 @@ def main():
     HA_TOKEN = args.ha_token
     HA_CALENDAR_ENTITY = args.ha_calendar_entity
 
-    print(f"[SCRIPT] Démarrage RSEQ avec team_url={TEAM_URL}")
-
     # Connexion MQTT
-    client = mqtt.Client(client_id="rseq_team_calendar")
+    client = mqtt.Client(client_id=f"rseq_team_calendar_{int(time.time())}")
     if MQTT_USER:
         client.username_pw_set(MQTT_USER, MQTT_PASS)
-
     try:
         client.connect(MQTT_HOST, MQTT_PORT, 60)
         client.loop_start()
@@ -289,70 +328,103 @@ def main():
         print(f"[ERREUR] MQTT: {e}")
         return
 
-    status = "success"
-    next_game = None
-    upcoming: List[Dict] = []
+    # Driver Selenium unique pour toutes les équipes (dans ce run)
+    driver = build_driver()
+
+    # Persistance événements
+    last = load_last_events()
 
     try:
-        rows = scrape_team_calendar(TEAM_URL)
-        ng, up = find_next_and_upcoming(rows)
-        next_game = ng
-        upcoming = up
-        if not rows:
-            status = "error: calendrier vide"
-    except Exception as e:
-        status = f"error: {e}"
-        print(f"[SCRIPT] ERREUR: {e}")
+        for team in teams:
+            name = team.get("name") or "default"
+            url = team.get("team_url") or ""
+            if not url:
+                print(f"[WARN] Équipe '{name}' sans team_url — ignorée.")
+                continue
 
-    # Création éventuelle d’un event HA (si next_game)
-    if next_game and HA_URL and HA_TOKEN and HA_CALENDAR_ENTITY:
-        last = load_last_events()
-        ng_key = next_game.get("datetime")
-        try:
-            if last.get("last_next_game") != ng_key:
-                summary = f"{next_game['visitor']} @ {next_game['home']} (RSEQ)"
-                start_iso = next_game["datetime"]
+            slug = slugify(name)
+            device_name = f"RSEQ – {name}"
+
+            print(f"[SCRIPT] Traitement équipe: {name} ({url})")
+            status = "success"
+            next_game = None
+            upcoming: List[Dict] = []
+
+            try:
+                rows = scrape_team_calendar(url, driver)
+                ng, up = find_next_and_upcoming(rows)
+                next_game = ng
+                upcoming = up
+                if not rows:
+                    status = "error: calendrier vide"
+            except Exception as e:
+                status = f"error: {e}"
+                print(f"[SCRIPT] ERREUR[{name}]: {e}")
+
+            # Event HA optionnel (anti-doublon par équipe)
+            if next_game and HA_URL and HA_TOKEN and HA_CALENDAR_ENTITY:
                 try:
-                    dt_start = datetime.fromisoformat(start_iso)
-                    dt_end = (dt_start + timedelta(hours=2)).isoformat()
-                except Exception:
-                    dt_end = start_iso
-                description = f"Endroit: {next_game.get('venue','-')} | Résultat: {next_game.get('result','')}"
-                create_event_in_ha(HA_URL, HA_TOKEN, HA_CALENDAR_ENTITY, start_iso, dt_end, summary, description)
-                last["last_next_game"] = ng_key
-                save_last_events(last)
+                    ng_key = f"{slug}:{next_game.get('datetime')}"
+                    if last.get(slug) != ng_key:
+                        summary = f"{next_game['visitor']} @ {next_game['home']} (RSEQ)"
+                        start_iso = next_game["datetime"]
+                        try:
+                            dt_start = datetime.fromisoformat(start_iso)
+                            if dt_start.tzinfo is None:
+                                # local par défaut
+                                end_iso = to_local_iso(dt_start + timedelta(hours=2))
+                                start_iso = to_local_iso(dt_start)
+                            else:
+                                end_iso = (dt_start + timedelta(hours=2)).isoformat()
+                        except Exception:
+                            end_iso = start_iso
+                        description = f"Endroit: {next_game.get('venue','-')} | Résultat: {next_game.get('result','')}"
+                        create_event_in_ha(HA_URL, HA_TOKEN, HA_CALENDAR_ENTITY, start_iso, end_iso, summary, description)
+                        last[slug] = ng_key
+                        save_last_events(last)
+                    else:
+                        print(f"[SCRIPT] Événement HA déjà créé pour '{name}'.")
+                except Exception as e:
+                    print(f"[SCRIPT] Erreur création événement HA [{name}]: {e}")
+
+            # Publication MQTT des sensors (1 équipe = 2 sensors)
+            # 1) status
+            sensor_id_status = f"{entity_prefix}_{slug}_status"
+            mqtt_discovery_publish(
+                client, DISCOVERY_PREFIX, sensor_id_status,
+                f"RSEQ – Statut ({name})", device_name, "mdi:information",
+                status, {"team_url": url, "last_updated": now_local().isoformat()}
+            )
+
+            # 2) prochain match
+            if next_game:
+                state_str = f"{next_game['date']} {next_game['time']} – {next_game['visitor']} @ {next_game['home']}"
             else:
-                print("[SCRIPT] Événement HA déjà créé pour ce prochain match.")
-        except Exception as e:
-            print(f"[SCRIPT] Erreur création événement HA: {e}")
+                state_str = "Aucun match à venir"
 
-    # Publication MQTT des sensors
-    device_name = "RSEQ Team Calendar"
-    # 1) status
-    mqtt_discovery_publish(
-        client, DISCOVERY_PREFIX, "rseq_team_status",
-        "RSEQ – Status", device_name, "mdi:information",
-        status, {}
-    )
-    # 2) prochain match
-    if next_game:
-        state_str = f"{next_game['date']} {next_game['time']} – {next_game['visitor']} @ {next_game['home']}"
-    else:
-        state_str = "Aucun match à venir"
-    attributes = {
-        "next_game": next_game,
-        "upcoming": upcoming,
-        "updated": datetime.now().isoformat()
-    }
-    mqtt_discovery_publish(
-        client, DISCOVERY_PREFIX, "rseq_team_next_game",
-        "RSEQ – Prochain match (équipe)", device_name, "mdi:calendar-account",
-        state_str, attributes
-    )
+            attributes = {
+                "team": name,
+                "team_url": url,
+                "next_game": next_game,
+                "upcoming": upcoming,
+                "updated": now_local().isoformat()
+            }
+            sensor_id_next = f"{entity_prefix}_{slug}_next_game"
+            mqtt_discovery_publish(
+                client, DISCOVERY_PREFIX, sensor_id_next,
+                f"RSEQ – Prochain match ({name})", device_name, "mdi:calendar-account",
+                state_str, attributes
+            )
 
-    client.loop_stop()
-    client.disconnect()
-    print("[SCRIPT] Terminé.")
+        print("[SCRIPT] Tous les teams traités.")
+    finally:
+        try:
+            driver.quit()
+        except Exception:
+            pass
+        client.loop_stop()
+        client.disconnect()
+        print("[SCRIPT] Terminé.")
 
 if __name__ == "__main__":
     main()
