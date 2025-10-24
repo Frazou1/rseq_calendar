@@ -1,8 +1,8 @@
 # https://developers.home-assistant.io/docs/add-ons/configuration#add-on-config
 name: RSEQ Team Calendar
-version: "1.2.0"
+version: "1.2.1"
 slug: rseq_team_calendar
-description: "Scrape un ou plusieurs calendriers RSEQ et publie le prochain match (1 sensor par équipe) via MQTT. Optionnel: création d’événements HA."
+description: "Scrape le calendrier RSEQ d'une équipe ou de plusieurs équipes et publie le prochain match via MQTT (optionnel: création d'événements HA)."
 url: "https://github.com/Frazou1/rseq_calendar"
 arch:
   - armhf
@@ -15,18 +15,13 @@ map:
   - share:rw
 
 options:
-  # --- NOUVEAU: multi-équipes (1 sensor par entrée) ---
-  entity_prefix: "rseq"  # préfixe des entity_id, ex: sensor.rseq_pierre
-  teams:
-    - name: "Pierre"
-      team_url: "https://diffusion.rseq.ca/Default?Type=Team&TeamId=3a82359e-d32c-43b2-ba3b-5d942d5d2c5f"
-    # - name: "Élise"
-    #   team_url: "https://diffusion.rseq.ca/Default?Type=Team&TeamId=xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-
-  # --- Compat legacy (optionnel si vous gardez l'ancien mode 1 équipe) ---
+  # ----- NOUVEAU (facultatif) : multi-équipes -----
+  entity_prefix: "rseq"
+  teams: []
+  # ----- Mode legacy : une seule équipe -----
   team_url: "https://diffusion.rseq.ca/Default?Type=Team&TeamId=3a82359e-d32c-43b2-ba3b-5d942d5d2c5f"
 
-  update_interval: 3600  # secondes
+  update_interval: 3600
 
   mqtt_host: "core-mosquitto"
   mqtt_port: 1883
@@ -36,7 +31,7 @@ options:
 
   # (Optionnel) création d'événements dans HA
   ha_url: "http://homeassistant.local:8123"
-  ha_token: ""                  # Jeton d'accès longue durée (ou vide si inutilisé)
+  ha_token: ""
   ha_calendar_entity: "calendar.rseq_equipes"
 
 schema:
@@ -44,10 +39,10 @@ schema:
   teams:
     - name: str
       team_url: str
-  team_url: str?                          # legacy, optionnel
-  update_interval: int(30, 86400)
+  team_url: str?                   # legacy
+  update_interval: int(30,86400)
   mqtt_host: str
-  mqtt_port: int(1, 65535)
+  mqtt_port: int(1,65535)
   mqtt_username: str
   mqtt_password: str
   discovery_prefix: str
