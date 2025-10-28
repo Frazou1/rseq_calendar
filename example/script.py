@@ -209,11 +209,86 @@ def extract_calendar_rows(page_html: str) -> List[Dict]:
 
     return rows
 
-def scrape_team_calendar(team_url: str, driver: webdriver.Chrome) -> List[Dict]:
+def extract_standings_rows(page_html: str) -> List[Dict]:
+    """
+    Parse le tableau #standingsTable. On lit l'en-tête pour détecter
+    dynamiquement les colonnes disponibles (certaines peuvent être cachées).
+    On tente de récupérer au minimum:
+      Pos, Équipe, MJ, V, D, N, PP, PC, MOY, PTS Eth (PES), PTS tot (PTS)
+    Retourne une liste de dicts triée par 'pos' asc si possible.
+    """
+    soup = BeautifulSoup(page_html, "html.parser")
+    table = soup.find("table", {"id": "standingsTable"})
+    if not table:
+        return []
+
+    # Récupérer les headers (même si certains ont display:none)
+    header_cells = table.select("thead tr th")
+    headers = [h.get_text(strip=True) for h in header_cells]
+
+    # Helper pour trouver l'index d'une colonne par libellé (tolérant)
+    def find_idx(names: List[str]) -> Optional[int]:
+        for i, h in enumerate(headers):
+            h_norm = h.lower()
+            for n in names:
+                if n in h_norm:
+                    return i
+        return None
+
+    idx_pos   = find_idx(["pos"])
+    idx_team  = find_idx(["équipe", "equipe", "team"])
+    idx_mj    = find_idx(["mj"])
+    idx_v     = find_idx([" v", "wins"])  # espace avant v évite match 'visiteur'
+    idx_d     = find_idx([" d", "losses"])
+    idx_n     = find_idx([" n", "draws"])
+    idx_pp    = find_idx(["pp", "points for"])
+    idx_pc    = find_idx(["pc", "points againts", "points against", "points againsts"])
+    idx_moy   = find_idx(["moy"])
+    idx_pes   = find_idx(["pts eth", "pes"])
+    idx_pts   = find_idx(["pts tot", "pts", "total points"])
+
+    rows: List[Dict] = []
+    for tr in table.select("tbody tr"):
+        tds = [td.get_text(strip=True) for td in tr.find_all("td")]
+        if not tds:
+            continue
+
+        def at(i: Optional[int]) -> Optional[str]:
+            return tds[i] if i is not None and i < len(tds) else None
+
+        entry = {
+            "pos":   at(idx_pos),
+            "team":  at(idx_team),
+            "MJ":    at(idx_mj),
+            "V":     at(idx_v),
+            "D":     at(idx_d),
+            "N":     at(idx_n),
+            "PP":    at(idx_pp),
+            "PC":    at(idx_pc),
+            "MOY":   at(idx_moy),
+            "PES":   at(idx_pes),
+            "PTS":   at(idx_pts),
+        }
+
+        # Filtre minimal: on garde les lignes qui ont au moins pos + team
+        if entry["pos"] and entry["team"]:
+            rows.append(entry)
+
+    # Try tri par position numérique si possible
+    def pos_key(e):
+        try:
+            return int(e["pos"])
+        except Exception:
+            return 999999
+
+    rows.sort(key=pos_key)
+    return rows
+
+def scrape_team_calendar(team_url: str, driver: webdriver.Chrome) -> Tuple[List[Dict], List[Dict]]:
     print(f"[SCRIPT] Ouverture: {team_url}")
     driver.get(team_url)
 
-    # Attente section / table
+    # Attente section / table du calendrier
     try:
         section = WebDriverWait(driver, 10).until(
             EC.presence_of_element_located((By.ID, "ScheduleSection"))
@@ -238,6 +313,23 @@ def scrape_team_calendar(team_url: str, driver: webdriver.Chrome) -> List[Dict]:
     html = driver.page_source
     rows = extract_calendar_rows(html)
 
+    # === Standings ===
+    try:
+        standings_sec = driver.find_element(By.ID, "StandingsSection")
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'});", standings_sec)
+        time.sleep(0.2)
+    except Exception:
+        pass
+
+    try:
+        WebDriverWait(driver, 5).until(
+            EC.presence_of_element_located((By.ID, "standingsTable"))
+        )
+        html = driver.page_source  # refresh après éventuelle maj DOM
+        standings = extract_standings_rows(html)
+    except Exception:
+        standings = []
+
     if not rows:
         try:
             os.makedirs("/share", exist_ok=True)
@@ -248,7 +340,8 @@ def scrape_team_calendar(team_url: str, driver: webdriver.Chrome) -> List[Dict]:
             print(f"[SCRIPT] Dump HTML impossible: {e}")
 
     print(f"[SCRIPT] {len(rows)} lignes de calendrier détectées.")
-    return rows
+    print(f"[SCRIPT] {len(standings)} lignes de standings détectées.")
+    return rows, standings
 
 def find_next_and_upcoming(rows: List[Dict]) -> Tuple[Optional[Dict], List[Dict]]:
     now = now_local()
@@ -261,7 +354,13 @@ def find_next_and_upcoming(rows: List[Dict]) -> Tuple[Optional[Dict], List[Dict]
             dt = datetime.fromisoformat(dt_iso)
             # Si ISO sans tz : considérer local
             if dt.tzinfo is None:
-                dt = now.tzinfo.localize(dt) if hasattr(now.tzinfo, "localize") else dt
+                # best effort: on colle l'offset du now local
+                try:
+                    import pytz
+                    tz = pytz.timezone(LOCAL_TZ)
+                    dt = tz.localize(dt)
+                except Exception:
+                    pass
             if dt >= now:
                 future.append(r)
         except Exception:
@@ -349,9 +448,10 @@ def main():
             status = "success"
             next_game = None
             upcoming: List[Dict] = []
+            standings: List[Dict] = []
 
             try:
-                rows = scrape_team_calendar(url, driver)
+                rows, standings = scrape_team_calendar(url, driver)
                 ng, up = find_next_and_upcoming(rows)
                 next_game = ng
                 upcoming = up
@@ -387,7 +487,7 @@ def main():
                 except Exception as e:
                     print(f"[SCRIPT] Erreur création événement HA [{name}]: {e}")
 
-            # Publication MQTT des sensors (1 équipe = 2 sensors)
+            # Publication MQTT des sensors (1 équipe = 3 sensors)
             # 1) status
             sensor_id_status = f"{entity_prefix}_{slug}_status"
             mqtt_discovery_publish(
@@ -414,6 +514,30 @@ def main():
                 client, DISCOVERY_PREFIX, sensor_id_next,
                 f"RSEQ – Prochain match ({name})", device_name, "mdi:calendar-account",
                 state_str, attributes
+            )
+
+            # 3) standings (classement)
+            def fmt_team_row(r):
+                pts = r.get("PTS") or r.get("PES") or "-"
+                return f"{r.get('pos','?')}) {r.get('team','?')} ({pts} pts)"
+
+            if standings:
+                top = " | ".join(fmt_team_row(r) for r in standings[:3])
+                standings_state = top if top else "Classement disponible"
+            else:
+                standings_state = "Classement indisponible"
+
+            sensor_id_stand = f"{entity_prefix}_{slug}_standings"
+            mqtt_discovery_publish(
+                client, DISCOVERY_PREFIX, sensor_id_stand,
+                f"RSEQ – Classement ({name})", device_name, "mdi:trophy",
+                standings_state,
+                {
+                    "team": name,
+                    "team_url": url,
+                    "standings": standings,
+                    "updated": now_local().isoformat()
+                }
             )
 
         print("[SCRIPT] Tous les teams traités.")
