@@ -179,35 +179,48 @@ def extract_calendar_rows(page_html: str) -> List[Dict]:
 
     rows: List[Dict] = []
     for tr in table.select("tbody tr"):
-        tds = [td.get_text(strip=True) for td in tr.find_all("td")]
+        tds = tr.find_all("td")
         if len(tds) < 9:
             continue
 
-        no = tds[1]
-        jour = tds[2]
-        date_str = tds[3]
-        time_str = tds[4]
-        visitor = tds[5]
-        result  = tds[6]
-        home    = tds[7]
-        venue   = tds[9] if len(tds) >= 10 else tds[8]
+        no = tds[1].get_text(strip=True)
+        jour = tds[2].get_text(strip=True)
+        date_str = tds[3].get_text(strip=True)
+        time_str = tds[4].get_text(strip=True)
+        visitor = tds[5].get_text(strip=True)
 
+        # ✅ Correction — extraction robuste du score même s'il est dans un <a>
+        result_td = tds[6]
+        result_link = result_td.find("a")
+        if result_link and result_link.get_text(strip=True):
+            result = result_link.get_text(strip=True)
+        else:
+            result = result_td.get_text(strip=True)
+
+        home = tds[7].get_text(strip=True)
+        venue = tds[9].get_text(strip=True) if len(tds) >= 10 else tds[8].get_text(strip=True)
+
+        # Conversion date/heure vers ISO local
         dt = parse_datetime_candidates(date_str, time_str) or parse_datetime_candidates(date_str, "")
         dt_iso = to_local_iso(dt) if dt else None
 
-        rows.append({
+        row = {
             "no": no,
             "jour": jour,
             "date": date_str,
             "time": time_str,
-            "datetime": dt_iso,   # ISO local avec offset si possible
+            "datetime": dt_iso,
             "visitor": visitor,
             "result": result,
             "home": home,
             "venue": venue
-        })
+        }
+
+        rows.append(row)
+        print(f"[DEBUG] Row parsed: {date_str} {time_str} | {visitor} @ {home} | result={result}")
 
     return rows
+
 
 def extract_standings_rows(page_html: str) -> List[Dict]:
     """
