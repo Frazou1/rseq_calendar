@@ -369,6 +369,29 @@ def find_next_and_upcoming(rows: List[Dict]) -> Tuple[Optional[Dict], List[Dict]
     return (future[0] if future else None), future[:5]
 
 # ---------- Main (multi-équipes) ----------
+def format_standings_for_card(standings: List[Dict]) -> Dict:
+    """Convertit les standings RSEQ en format compatible SportStandingsScores"""
+    formatted = []
+    for r in standings:
+        formatted.append({
+            "pos": r.get("pos", ""),
+            "team": r.get("team", ""),
+            "MJ": r.get("MJ", ""),
+            "V": r.get("V", ""),
+            "D": r.get("D", ""),
+            "N": r.get("N", ""),
+            "PP": r.get("PP", ""),
+            "PC": r.get("PC", ""),
+            "MOY": r.get("MOY", ""),
+            "PES": r.get("PES", ""),
+            "PTS": r.get("PTS", "")
+        })
+    return {
+        "league": "RSEQ",
+        "standings": formatted,
+        "updated": now_local().isoformat()
+    }
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -528,17 +551,15 @@ def main():
                 standings_state = "Classement indisponible"
 
             sensor_id_stand = f"{entity_prefix}_{slug}_standings"
+            standings_payload = format_standings_for_card(standings)
+            
             mqtt_discovery_publish(
                 client, DISCOVERY_PREFIX, sensor_id_stand,
                 f"RSEQ – Classement ({name})", device_name, "mdi:trophy",
-                standings_state,
-                {
-                    "team": name,
-                    "team_url": url,
-                    "standings": standings,
-                    "updated": now_local().isoformat()
-                }
+                f"{len(standings)} équipes",
+                standings_payload
             )
+
 
         print("[SCRIPT] Tous les teams traités.")
     finally:
