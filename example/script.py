@@ -524,7 +524,8 @@ def main():
                 "upcoming": upcoming,
                 "updated": now_local().isoformat()
             }
-            sensor_id_next = f"{entity_prefix}_{slug}_next_game"
+            # ATTENTION: Utilisation de l'ID corrigé par le user pour éviter les erreurs de lecture Lovelace
+            sensor_id_next = f"{entity_prefix}_{slug}_prochain_match_{slug}"
             mqtt_discovery_publish(
                 client, DISCOVERY_PREFIX, sensor_id_next,
                 f"RSEQ – Prochain match ({name})", device_name, "mdi:calendar-account",
@@ -542,10 +543,21 @@ def main():
             else:
                 standings_state = "Classement indisponible"
             
-            # --- CORRECTION APPLIQUÉE ICI ---
+            # --- Prépare les données et les colonnes pour les cartes Lovelace (table_data) ---
             cleaned_standings = clean_none_values(standings)
 
-            sensor_id_stand = f"{entity_prefix}_{slug}_standings"
+            # Définition des colonnes standard (pour flex-table-card / atomic-calendar-revive)
+            table_columns = [
+                {"name": "Pos", "data": "pos", "align": "center"},
+                {"name": "Équipe", "data": "team", "align": "left"},
+                {"name": "MJ", "data": "MJ", "align": "center"},
+                {"name": "V", "data": "V", "align": "center"},
+                {"name": "D", "data": "D", "align": "center"},
+                {"name": "PCT", "data": "MOY", "align": "center"},
+                {"name": "PTS", "data": "PTS", "align": "center"},
+            ]
+
+            sensor_id_stand = f"{entity_prefix}_{slug}_classement_{slug}"
             mqtt_discovery_publish(
                 client, DISCOVERY_PREFIX, sensor_id_stand,
                 f"RSEQ – Classement ({name})", device_name, "mdi:trophy",
@@ -553,7 +565,9 @@ def main():
                 {
                     "team": name,
                     "team_url": url,
-                    "standings": cleaned_standings, # Utilisation des données nettoyées
+                    "standings": cleaned_standings,        # Ancienne clé (pour compatibilité)
+                    "table_columns": table_columns,        # Nouvelle clé: structure de colonnes
+                    "table_data": cleaned_standings,       # Nouvelle clé: données (liste de dicts)
                     "updated": now_local().isoformat()
                 }
             )
