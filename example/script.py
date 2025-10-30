@@ -368,6 +368,28 @@ def find_next_and_upcoming(rows: List[Dict]) -> Tuple[Optional[Dict], List[Dict]
     future.sort(key=lambda x: x["datetime"])
     return (future[0] if future else None), future[:5]
 
+def find_last_played(rows):
+    now = now_local()
+    past = []
+    for r in rows:
+        try:
+            dt_iso = r.get("datetime")
+            if not dt_iso:
+                continue
+            dt = datetime.fromisoformat(dt_iso)
+            # Si ISO sans tz, on le localise
+            if dt.tzinfo is None:
+                import pytz
+                tz = pytz.timezone(LOCAL_TZ)
+                dt = tz.localize(dt)
+            # On ne garde que les matchs avant maintenant ET avec résultat
+            if dt < now and (r.get("result") and len(r["result"].strip()) > 0):
+                past.append(r)
+        except Exception:
+            continue
+    past.sort(key=lambda x: x["datetime"], reverse=True)
+    return past[0] if past else None
+
 # ---------- Main (multi-équipes) ----------
 def format_standings_for_card(standings: List[Dict]) -> Dict:
     """Convertit les standings RSEQ en format compatible SportStandingsScores"""
@@ -559,6 +581,23 @@ def main():
                 f"{len(standings)} équipes",
                 standings_payload
             )
+            # 4) Dernier match
+            last_game = find_last_played(rows)
+            if last_game:
+                state_str = f"{last_game['date']} {last_game['time']} – {last_game['visitor']} @ {last_game['home']} ({last_game['result']})"
+                attributes = {
+                    "team": name,
+                    "team_url": url,
+                    "last_game": last_game,
+                    "updated": now_local().isoformat()
+                }
+                sensor_id_last = f"{entity_prefix}_{slug}_last_game"
+                mqtt_discovery_publish(
+                    client, DISCOVERY_PREFIX, sensor_id_last,
+                    f"RSEQ – Dernier match ({name})", device_name, "mdi:basketball",
+                    state_str, attributes
+                )
+
 
 
         print("[SCRIPT] Tous les teams traités.")
