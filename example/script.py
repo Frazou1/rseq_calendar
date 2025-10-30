@@ -594,22 +594,27 @@ def main():
                 f"{len(standings)} équipes",
                 standings_payload
             )
-            # 4) Dernier match
-            last_game = find_last_played(rows)
-            if last_game:
-                state_str = f"{last_game['date']} {last_game['time']} – {last_game['visitor']} @ {last_game['home']} ({last_game['result']})"
-                attributes = {
-                    "team": name,
-                    "team_url": url,
-                    "last_game": last_game,
-                    "updated": now_local().isoformat()
-                }
-                sensor_id_last = f"{entity_prefix}_{slug}_last_game"
-                mqtt_discovery_publish(
-                    client, DISCOVERY_PREFIX, sensor_id_last,
-                    f"RSEQ – Dernier match ({name})", device_name, "mdi:basketball",
-                    state_str, attributes
-                )
+# 4) Dernier match
+last_game = find_last_played(rows)
+if last_game:
+    state_str = f"{last_game['date']} {last_game['time']} – {last_game['visitor']} @ {last_game['home']} ({last_game['result']})"
+    attributes = {
+        "team": name,
+        "team_url": url,
+        "last_game": last_game,
+        "updated": now_local().isoformat()
+    }
+    sensor_id_last = f"{entity_prefix}_{slug}_last_game"
+
+    # 🔍 Ligne de debug à ajouter ici
+    print(f"[DEBUG] Last game found for {name}: {json.dumps(last_game, ensure_ascii=False)}")
+
+    mqtt_discovery_publish(
+        client, DISCOVERY_PREFIX, sensor_id_last,
+        f"RSEQ – Dernier match ({name})", device_name, "mdi:basketball",
+        state_str, attributes
+    )
+
 
 
 
