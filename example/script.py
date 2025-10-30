@@ -384,24 +384,33 @@ def find_next_and_upcoming(rows: List[Dict]) -> Tuple[Optional[Dict], List[Dict]
 def find_last_played(rows):
     now = now_local()
     past = []
+    import pytz
+    tz = pytz.timezone(LOCAL_TZ)
+
     for r in rows:
         try:
             dt_iso = r.get("datetime")
             if not dt_iso:
                 continue
             dt = datetime.fromisoformat(dt_iso)
-            # Si ISO sans tz, on le localise
+            # Forcer la timezone locale si absente
             if dt.tzinfo is None:
-                import pytz
-                tz = pytz.timezone(LOCAL_TZ)
                 dt = tz.localize(dt)
-            # On ne garde que les matchs avant maintenant ET avec résultat
-            if dt < now and (r.get("result") and len(r["result"].strip()) > 0):
+            # On ne garde que les matchs avant maintenant ET avec résultat non vide
+            result = r.get("result", "").strip()
+            if dt < now and result and re.search(r"\d", result):
                 past.append(r)
-        except Exception:
+        except Exception as e:
+            print(f"[DEBUG] Erreur find_last_played: {e}")
             continue
-    past.sort(key=lambda x: x["datetime"], reverse=True)
+
+    past.sort(key=lambda x: x.get("datetime") or "", reverse=True)
+    if past:
+        print(f"[DEBUG] Dernier match détecté: {past[0]['date']} {past[0]['time']} | {past[0]['visitor']} @ {past[0]['home']} ({past[0]['result']})")
+    else:
+        print("[DEBUG] Aucun match passé détecté.")
     return past[0] if past else None
+
 
 # ---------- Main (multi-équipes) ----------
 def format_standings_for_card(standings: List[Dict]) -> Dict:
