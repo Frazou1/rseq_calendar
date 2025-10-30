@@ -10,7 +10,6 @@ import requests
 import paho.mqtt.client as mqtt
 from bs4 import BeautifulSoup
 
-# Selenium (site RSEQ rendu côté client)
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -51,18 +50,6 @@ def now_local() -> datetime:
     except Exception:
         return datetime.now()
 
-def clean_none_values(data):
-    """Remplace récursivement toutes les valeurs None par des chaînes vides (pour Lovelace)."""
-    if isinstance(data, dict):
-        return {k: clean_none_values(v) for k, v in data.items()}
-    if isinstance(data, list):
-        return [clean_none_values(item) for item in data]
-    if data is None:
-        return ""
-    return data
-
-# ---------- Persistance anti-doublons (événements HA) ----------
-
 def load_last_events() -> Dict:
     if os.path.exists(STATE_FILE):
         try:
@@ -79,8 +66,6 @@ def save_last_events(state: Dict) -> None:
     except Exception as e:
         print(f"[SCRIPT] Erreur sauvegarde état: {e}")
 
-# ---------- MQTT (Discovery) ----------
-
 def mqtt_discovery_publish(client: mqtt.Client, discovery_prefix: str, sensor_id: str,
                            name: str, device_name: str, icon: str,
                            state: str, attributes: Optional[Dict] = None) -> None:
@@ -88,7 +73,6 @@ def mqtt_discovery_publish(client: mqtt.Client, discovery_prefix: str, sensor_id
     config_topic = f"{base}/config"
     state_topic = f"{base}/state"
     attr_topic = f"{base}/attributes"
-
     config_payload = {
         "name": name,
         "uniq_id": sensor_id,
@@ -99,10 +83,31 @@ def mqtt_discovery_publish(client: mqtt.Client, discovery_prefix: str, sensor_id
     }
     client.publish(config_topic, json.dumps(config_payload), retain=True, qos=1)
     if attributes is not None:
-        client.publish(attr_topic, json.dumps(attributes), retain=True, qos=0)
+        client.publish(attr_topic, json.dumps(attributes, ensure_ascii=False), retain=True, qos=0)
     client.publish(state_topic, state, retain=True, qos=0)
 
-# ---------- Scraping ----------
+def create_event_in_ha(ha_url: str, ha_token: str, ha_calendar_entity: str,
+                       start_iso: str, end_iso: str,
+                       summary: str, description: str) -> None:
+    if not (ha_url and ha_token and ha_calendar_entity):
+        return
+    url = f"{ha_url}/api/services/script/turn_on"
+    headers = {"Authorization": f"Bearer {ha_token}", "Content-Type": "application/json"}
+    payload = {
+        "entity_id": "script.create_calendar_event",
+        "variables": {
+            "calendar_entity": ha_calendar_entity,
+            "start_date": start_iso,
+            "end_date": end_iso,
+            "summary": summary,
+            "description": description,
+        }
+    }
+    r = requests.post(url, headers=headers, json=payload, timeout=20)
+    if r.status_code != 200:
+        raise RuntimeError(f"HA event error {r.status_code}: {r.text}")
+
+# ---------- Scraping RSEQ ----------
 
 def build_driver() -> webdriver.Chrome:
     chrome_options = Options()
@@ -115,32 +120,45 @@ def build_driver() -> webdriver.Chrome:
         chrome_options.add_argument("--disable-dev-shm-usage")
         chrome_options.add_argument("--no-sandbox")
         chrome_options.add_argument("--window-size=1366,2400")
-
     chrome_options.add_argument("--lang=fr-CA")
-    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
+    chrome_options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36")
     service = Service("/usr/bin/chromedriver")
     return webdriver.Chrome(service=service, options=chrome_options)
+
+def parse_datetime_candidates(date_str: str, time_str: str) -> Optional[datetime]:
+    ds = (date_str or "").strip()
+    ts = (time_str or "").strip().replace("h", ":").replace("H", ":")
+    if ts and re.fullmatch(r"^\d{1,2}$", ts):
+        ts = f"{ts}:00"
+    dt_text = f"{ds} {ts}".strip() if ts else ds
+    fmts = ["%Y-%m-%d %H:%M", "%Y-%m-%d", "%d-%m-%Y %H:%M", "%d-%m-%Y",
+            "%d/%m/%Y %H:%M", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S"]
+    for fmt in fmts:
+        try:
+            return datetime.strptime(dt_text, fmt)
+        except ValueError:
+            continue
+    return None
 
 def extract_calendar_rows(page_html: str) -> List[Dict]:
     soup = BeautifulSoup(page_html, "html.parser")
     table = soup.find("table", {"id": "CalendarTable"})
     if not table:
         raise RuntimeError("Table #CalendarTable non trouvée")
-
     rows = []
     for tr in table.select("tbody tr"):
         tds = [td.get_text(strip=True) for td in tr.find_all("td")]
         if len(tds) < 9:
             continue
+        no, jour, date_str, time_str, visitor, result, home = tds[1:8]
+        venue = tds[9] if len(tds) >= 10 else tds[8]
+        dt = parse_datetime_candidates(date_str, time_str) or parse_datetime_candidates(date_str, "")
+        dt_iso = to_local_iso(dt) if dt else None
         rows.append({
-            "no": tds[1],
-            "jour": tds[2],
-            "date": tds[3],
-            "time": tds[4],
-            "visitor": tds[5],
-            "result": tds[6],
-            "home": tds[7],
-            "venue": tds[9] if len(tds) >= 10 else tds[8]
+            "no": no, "jour": jour, "date": date_str, "time": time_str,
+            "datetime": dt_iso, "visitor": visitor, "result": result,
+            "home": home, "venue": venue
         })
     return rows
 
@@ -149,9 +167,7 @@ def extract_standings_rows(page_html: str) -> List[Dict]:
     table = soup.find("table", {"id": "standingsTable"})
     if not table:
         return []
-
     headers = [h.get_text(strip=True) for h in table.select("thead tr th")]
-
     def find_idx(names):
         for i, h in enumerate(headers):
             h_norm = h.lower()
@@ -159,7 +175,6 @@ def extract_standings_rows(page_html: str) -> List[Dict]:
                 if n in h_norm:
                     return i
         return None
-
     idx_pos = find_idx(["pos"])
     idx_team = find_idx(["équipe", "equipe", "team"])
     idx_mj = find_idx(["mj"])
@@ -171,41 +186,30 @@ def extract_standings_rows(page_html: str) -> List[Dict]:
     idx_moy = find_idx(["moy"])
     idx_pes = find_idx(["pts eth", "pes"])
     idx_pts = find_idx(["pts tot", "pts", "total points"])
-
     rows = []
     for tr in table.select("tbody tr"):
         tds = [td.get_text(strip=True) for td in tr.find_all("td")]
         if not tds:
             continue
-
         def at(i): return tds[i] if i is not None and i < len(tds) else None
-
         entry = {
-            "pos": at(idx_pos),
-            "team": at(idx_team),
-            "MJ": at(idx_mj),
-            "V": at(idx_v),
-            "D": at(idx_d),
-            "N": at(idx_n),
-            "PP": at(idx_pp),
-            "PC": at(idx_pc),
-            "MOY": at(idx_moy),
-            "PES": at(idx_pes),
-            "PTS": at(idx_pts),
+            "pos": at(idx_pos), "team": at(idx_team), "MJ": at(idx_mj),
+            "V": at(idx_v), "D": at(idx_d), "N": at(idx_n),
+            "PP": at(idx_pp), "PC": at(idx_pc), "MOY": at(idx_moy),
+            "PES": at(idx_pes), "PTS": at(idx_pts),
         }
         if entry["pos"] and entry["team"]:
             rows.append(entry)
-
     def pos_key(e):
         try:
             return int(e["pos"])
         except Exception:
             return 999999
-
     rows.sort(key=pos_key)
     return rows
 
 def scrape_team_calendar(team_url: str, driver: webdriver.Chrome) -> Tuple[List[Dict], List[Dict]]:
+    print(f"[SCRIPT] Ouverture: {team_url}")
     driver.get(team_url)
     WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.ID, "CalendarTable")))
     html = driver.page_source
@@ -214,7 +218,28 @@ def scrape_team_calendar(team_url: str, driver: webdriver.Chrome) -> Tuple[List[
         standings = extract_standings_rows(html)
     except Exception:
         standings = []
+    print(f"[SCRIPT] {len(rows)} matchs, {len(standings)} standings.")
     return rows, standings
+
+def find_next_and_upcoming(rows: List[Dict]) -> Tuple[Optional[Dict], List[Dict]]:
+    now = now_local()
+    future = []
+    for r in rows:
+        try:
+            dt_iso = r.get("datetime")
+            if not dt_iso:
+                continue
+            dt = datetime.fromisoformat(dt_iso)
+            if dt.tzinfo is None:
+                import pytz
+                tz = pytz.timezone(LOCAL_TZ)
+                dt = tz.localize(dt)
+            if dt >= now:
+                future.append(r)
+        except Exception:
+            continue
+    future.sort(key=lambda x: x["datetime"])
+    return (future[0] if future else None), future[:5]
 
 # ---------- Main ----------
 
@@ -228,6 +253,9 @@ def main():
     parser.add_argument("--mqtt_user", default="")
     parser.add_argument("--mqtt_pass", default="")
     parser.add_argument("--discovery_prefix", default="homeassistant")
+    parser.add_argument("--ha_url", default="")
+    parser.add_argument("--ha_token", default="")
+    parser.add_argument("--ha_calendar_entity", default="")
     args = parser.parse_args()
 
     teams = []
@@ -236,7 +264,6 @@ def main():
             teams = json.loads(args.teams_json)
         except Exception as e:
             print(f"[ERREUR] teams-json invalide: {e}")
-            teams = []
     elif args.team_url:
         teams = [{"name": "default", "team_url": args.team_url}]
     else:
@@ -248,8 +275,8 @@ def main():
         client.username_pw_set(args.mqtt_user, args.mqtt_pass)
     client.connect(args.mqtt_host, int(args.mqtt_port), 60)
     client.loop_start()
-
     driver = build_driver()
+    last = load_last_events()
 
     try:
         for team in teams:
@@ -257,11 +284,17 @@ def main():
             url = team.get("team_url") or ""
             slug = slugify(name)
             device_name = f"RSEQ – {name}"
+            print(f"[SCRIPT] Traitement équipe: {name}")
 
-            rows, standings = scrape_team_calendar(url, driver)
-            cleaned_standings = clean_none_values(standings)
+            status = "success"
+            try:
+                rows, standings = scrape_team_calendar(url, driver)
+            except Exception as e:
+                print(f"[ERREUR scrape]: {e}")
+                standings, rows, status = [], [], f"error: {e}"
+            next_game, upcoming = find_next_and_upcoming(rows)
 
-            # --- Format compatible SportStandingsScores ---
+            # ---- Classement format SportStandingsScores ----
             sport_standings = {
                 "league": "RSEQ",
                 "season": f"{now_local().year}-{now_local().year + 1}",
@@ -275,21 +308,18 @@ def main():
                         "pct": float(r.get("MOY") or 0),
                         "points": int(r.get("PTS") or r.get("PES") or 0)
                     }
-                    for r in cleaned_standings
+                    for r in standings
                 ],
                 "updated": now_local().isoformat()
             }
 
-            standings_state = (
-                " | ".join(f"{r['pos']}) {r['team']} ({r.get('PTS') or r.get('PES')} pts)" for r in cleaned_standings[:3])
-                if cleaned_standings else "Classement indisponible"
-            )
-
-            sensor_id_stand = f"{args.entity_prefix}_{slug}_classement_{slug}"
+            # ---- MQTT publication du classement ----
+            top = " | ".join(f"{r['pos']}) {r['team']} ({r.get('PTS') or r.get('PES')} pts)" for r in standings[:3]) if standings else "Classement indisponible"
+            sensor_id_stand = f"{args.entity_prefix}_{slug}_classement"
             mqtt_discovery_publish(
                 client, args.discovery_prefix, sensor_id_stand,
                 f"RSEQ – Classement ({name})", device_name, "mdi:trophy",
-                standings_state,
+                top,
                 {
                     "team": name,
                     "team_url": url,
