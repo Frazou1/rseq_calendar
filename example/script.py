@@ -545,7 +545,7 @@ def main():
                 except Exception as e:
                     print(f"[SCRIPT] Erreur création événement HA [{name}]: {e}")
 
-            # Publication MQTT des sensors (1 équipe = 3 sensors)
+            # Publication MQTT des sensors (1 équipe = 4 sensors)
             # 1) status
             sensor_id_status = f"{entity_prefix}_{slug}_status"
             mqtt_discovery_publish(
@@ -587,13 +587,13 @@ def main():
 
             sensor_id_stand = f"{entity_prefix}_{slug}_standings"
             standings_payload = format_standings_for_card(standings)
-            
             mqtt_discovery_publish(
                 client, DISCOVERY_PREFIX, sensor_id_stand,
                 f"RSEQ – Classement ({name})", device_name, "mdi:trophy",
                 f"{len(standings)} équipes",
                 standings_payload
             )
+
             # 4) Dernier match
             last_game = find_last_played(rows)
             if last_game:
@@ -605,20 +605,19 @@ def main():
                     "updated": now_local().isoformat()
                 }
                 sensor_id_last = f"{entity_prefix}_{slug}_last_game"
-            
-                # 🔍 Ligne de debug à ajouter ici
+
+                # 🔍 Debug info
                 print(f"[DEBUG] Last game found for {name}: {json.dumps(last_game, ensure_ascii=False)}")
-            
+
                 mqtt_discovery_publish(
                     client, DISCOVERY_PREFIX, sensor_id_last,
                     f"RSEQ – Dernier match ({name})", device_name, "mdi:basketball",
                     state_str, attributes
                 )
 
-
-
-
+        # ✅ Fin de la boucle for
         print("[SCRIPT] Tous les teams traités.")
+
     finally:
         try:
             driver.quit()
