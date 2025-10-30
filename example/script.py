@@ -381,11 +381,11 @@ def find_next_and_upcoming(rows: List[Dict]) -> Tuple[Optional[Dict], List[Dict]
     future.sort(key=lambda x: x["datetime"])
     return (future[0] if future else None), future[:5]
 
+from zoneinfo import ZoneInfo
+
 def find_last_played(rows):
-    now = now_local()
+    now = datetime.now(ZoneInfo(LOCAL_TZ))
     past = []
-    import pytz
-    tz = pytz.timezone(LOCAL_TZ)
 
     for r in rows:
         try:
@@ -395,7 +395,7 @@ def find_last_played(rows):
             dt = datetime.fromisoformat(dt_iso)
             # Forcer la timezone locale si absente
             if dt.tzinfo is None:
-                dt = tz.localize(dt)
+                dt = dt.replace(tzinfo=ZoneInfo(LOCAL_TZ))
             # On ne garde que les matchs avant maintenant ET avec résultat non vide
             result = r.get("result", "").strip()
             if dt < now and result and re.search(r"\d", result):
@@ -410,6 +410,7 @@ def find_last_played(rows):
     else:
         print("[DEBUG] Aucun match passé détecté.")
     return past[0] if past else None
+
 
 
 # ---------- Main (multi-équipes) ----------
