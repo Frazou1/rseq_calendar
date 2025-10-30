@@ -52,6 +52,19 @@ def now_local() -> datetime:
     except Exception:
         return datetime.now()
 
+# ---------- Nettoyage des None (pour les attributs Lovelace) ----------
+
+def clean_none_values(data):
+    """Remplace récursivement toutes les valeurs None par des chaînes vides (pour Lovelace)."""
+    if isinstance(data, dict):
+        return {k: clean_none_values(v) for k, v in data.items()}
+    if isinstance(data, list):
+        return [clean_none_values(item) for item in data]
+    if data is None:
+        return "" # Correction pour flex-table-card
+    return data
+
+
 # ---------- Persistance anti-doublons (événements HA) ----------
 
 def load_last_events() -> Dict:
@@ -90,7 +103,9 @@ def mqtt_discovery_publish(client: mqtt.Client, discovery_prefix: str, sensor_id
     }
     client.publish(config_topic, json.dumps(config_payload), retain=True, qos=1)
     if attributes is not None:
-        client.publish(attr_topic, json.dumps(attributes, ensure_ascii=False), retain=True, qos=0)
+        # ATTENTION: On retire `ensure_ascii=False` pour le moment pour standardiser l'encodage
+        # Si vous rencontrez des problèmes d'accents, remettez-le.
+        client.publish(attr_topic, json.dumps(attributes), retain=True, qos=0)
     client.publish(state_topic, state, retain=True, qos=0)
 
 # ---------- Création d’événements HA (optionnelle) ----------
@@ -200,7 +215,7 @@ def extract_calendar_rows(page_html: str) -> List[Dict]:
             "jour": jour,
             "date": date_str,
             "time": time_str,
-            "datetime": dt_iso,   # ISO local avec offset si possible
+            "datetime": dt_iso,    # ISO local avec offset si possible
             "visitor": visitor,
             "result": result,
             "home": home,
@@ -526,6 +541,9 @@ def main():
                 standings_state = top if top else "Classement disponible"
             else:
                 standings_state = "Classement indisponible"
+            
+            # --- CORRECTION APPLIQUÉE ICI ---
+            cleaned_standings = clean_none_values(standings)
 
             sensor_id_stand = f"{entity_prefix}_{slug}_standings"
             mqtt_discovery_publish(
@@ -535,7 +553,7 @@ def main():
                 {
                     "team": name,
                     "team_url": url,
-                    "standings": standings,
+                    "standings": cleaned_standings, # Utilisation des données nettoyées
                     "updated": now_local().isoformat()
                 }
             )
