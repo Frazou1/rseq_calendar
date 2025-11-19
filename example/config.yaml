@@ -49,7 +49,3 @@ schema:
   ha_url: str
   ha_token: str
   ha_calendar_entity: str
-
-build:
-  builder: docker
-  file: Dockerfile
