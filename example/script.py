@@ -224,10 +224,7 @@ def extract_calendar_rows(page_html: str) -> List[Dict]:
 
 def extract_standings_rows(page_html: str) -> List[Dict]:
     """
-    Parse le tableau #standingsTable. On lit l'en-tête pour détecter
-    dynamiquement les colonnes disponibles (certaines peuvent être cachées).
-    On tente de récupérer au minimum:
-      Pos, Équipe, MJ, V, D, N, PP, PC, MOY, PTS Eth (PES), PTS tot (PTS)
+    Parse le tableau #standingsTable. Détection robuste des colonnes (tolérance multi-libellés).
     Retourne une liste de dicts triée par 'pos' asc si possible.
     """
     soup = BeautifulSoup(page_html, "html.parser")
@@ -238,31 +235,49 @@ def extract_standings_rows(page_html: str) -> List[Dict]:
     # Récupérer les headers (même si certains ont display:none)
     header_cells = table.select("thead tr th")
     headers = [h.get_text(strip=True) for h in header_cells]
+    headers_norm = [h.lower().strip() for h in headers]
 
     # Helper pour trouver l'index d'une colonne par libellé (tolérant)
     def find_idx(names: List[str]) -> Optional[int]:
-        for i, h in enumerate(headers):
-            h_norm = h.lower()
+        # 1) recherche "contenu" (contains)
+        for i, h in enumerate(headers_norm):
             for n in names:
-                if n in h_norm:
+                if n in h:
                     return i
+        # 2) recherche égalité sur token (par ex 'v' exactly)
+        for i, h in enumerate(headers_norm):
+            for n in names:
+                if h == n:
+                    return i
+                # tokenisé : évite "visiteur" qui contient 'v'
+                tokens = re.split(r"\s+|/|-|\|", h)
+                if n in tokens:
+                    return i
+        # 3) fallback: première colonne qui ressemble à une courte étiquette (1-3 chars) et match letter
+        for i, h in enumerate(headers_norm):
+            if len(h) <= 3:
+                for n in names:
+                    if h.startswith(n) or h == n:
+                        return i
         return None
 
-    idx_pos   = find_idx(["pos"])
-    idx_team  = find_idx(["équipe", "equipe", "team"])
-    idx_mj    = find_idx(["mj"])
-    idx_v     = find_idx([" v", "wins"])  # espace avant v évite match 'visiteur'
-    idx_d     = find_idx([" d", "losses"])
-    idx_n     = find_idx([" n", "draws"])
-    idx_pp    = find_idx(["pp", "points for"])
-    idx_pc    = find_idx(["pc", "points againts", "points against", "points againsts"])
-    idx_moy   = find_idx(["moy"])
-    idx_pes   = find_idx(["pts eth", "pes"])
-    idx_pts   = find_idx(["pts tot", "pts", "total points"])
+    # patterns à essayer (ordre = priorité)
+    idx_pos   = find_idx(["pos", "#", "position"])
+    idx_team  = find_idx(["équipe", "equipe", "team", "club", "formation"])
+    idx_mj    = find_idx(["mj", "j", "joués", "joues", "played", "matches"])
+    idx_v     = find_idx(["v", "victoire", "victoires", "wins", "w"])
+    idx_d     = find_idx(["d", "défaite", "defaite", "défaites", "defaites", "loss", "losses", "l"])
+    idx_n     = find_idx(["n", "nul", "null", "draw", "draws", "ties", "tie"])
+    idx_pp    = find_idx(["pp", "points for", "pour", "pf", "points pour"])
+    idx_pc    = find_idx(["pc", "points against", "contre", "pa", "points contre"])
+    idx_moy   = find_idx(["moy", "pct", "pct", "average", "moyenne"])
+    idx_pes   = find_idx(["pts eth", "pes", "pts ethique", "ptseth", "eth"])
+    idx_pts   = find_idx(["pts tot", "pts", "points", "total points", "total"])
 
     rows: List[Dict] = []
     for tr in table.select("tbody tr"):
-        tds = [td.get_text(strip=True) for td in tr.find_all("td")]
+        tds_raw = tr.find_all("td")
+        tds = [td.get_text(strip=True) for td in tds_raw]
         if not tds:
             continue
 
@@ -283,6 +298,31 @@ def extract_standings_rows(page_html: str) -> List[Dict]:
             "PTS":   at(idx_pts),
         }
 
+        # Normaliser valeurs "null" / None -> None for now
+        for k in ["MJ","V","D","N","PP","PC","MOY","PES","PTS"]:
+            v = entry.get(k)
+            if v is None or v.lower() in ("null", "none", "-"):
+                entry[k] = None
+
+        # Si V/D/N absentes MAIS qu'on a MJ + MOY => calculer V = round(MJ * MOY)
+        try:
+            if (entry.get("V") is None) and entry.get("MJ") and entry.get("MOY"):
+                mjf = float(entry["MJ"].replace(",", "."))
+                moyf = float(entry["MOY"].replace(",", "."))
+                victories = int(round(mjf * moyf))
+                defeats = int(round(mjf)) - victories
+                entry["V"] = str(max(0, victories))
+                entry["D"] = str(max(0, defeats))
+                entry["N"] = "0"
+        except Exception:
+            # ignore if parse failed
+            pass
+
+        # Dernière passe : si toujours None, remplacer par "" pour publication propre
+        for k in ["MJ","V","D","N","PP","PC","MOY","PES","PTS"]:
+            if entry.get(k) is None:
+                entry[k] = ""
+
         # Filtre minimal: on garde les lignes qui ont au moins pos + team
         if entry["pos"] and entry["team"]:
             rows.append(entry)
@@ -296,6 +336,7 @@ def extract_standings_rows(page_html: str) -> List[Dict]:
 
     rows.sort(key=pos_key)
     return rows
+
 
 def scrape_team_calendar(team_url: str, driver: webdriver.Chrome) -> Tuple[List[Dict], List[Dict]]:
     print(f"[SCRIPT] Ouverture: {team_url}")
