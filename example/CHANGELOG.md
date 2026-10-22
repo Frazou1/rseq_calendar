@@ -1,5 +1,12 @@
 <!-- https://developers.home-assistant.io/docs/add-ons/presentation#keeping-a-changelog -->
 
+## 1.4.0
+
+- Nouveau site RSEQ-QCA (saison 2026-2027) : `team_url` peut être une page de ligue
+  `https://rseqqca.com/ligue/<id>` ; ajouter alors `team_name` (nom de l'équipe sur la page, ex. « Accueil »).
+  Lecture HTML directe, sans navigateur ; mêmes capteurs et mêmes attributs qu'avant (+ `phase`).
+- L'ancien site `diffusion.rseq.ca` reste pris en charge (Selenium démarré seulement s'il est utilisé).
+
 ## 1.3.1
 
 Remove loop to read 2 event in same date

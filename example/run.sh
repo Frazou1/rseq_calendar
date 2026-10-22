@@ -47,7 +47,7 @@ echo "[INFO] Entity prefix         = $ENTITY_PREFIX"
 
 # Liste lisible des équipes dans les logs
 echo "[INFO] Équipes configurées :"
-echo "$TEAMS_JSON" | jq -r '.[] | "- \(.name) -> \(.team_url)"'
+echo "$TEAMS_JSON" | jq -r '.[] | "- \(.name) -> \(.team_url)\(if .team_name then " (équipe : \(.team_name))" else "" end)"'
 
 # Facultatif : Flags Chromium headless (si tu veux les injecter au script)
 export CHROMIUM_FLAGS="${CHROMIUM_FLAGS:---headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu --window-size=1920,1080}"

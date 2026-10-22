@@ -39,6 +39,7 @@ En option, l’add-on peut aussi créer des événements dans le calendrier Home
 | Clé                | Description                                                  | Valeur par défaut                         |
 |---------------------|--------------------------------------------------------------|-------------------------------------------|
 | `team_url`          | URL de la page d’équipe RSEQ (onglet Calendrier)             | `""`                                      |
+| `teams[].team_name` | Nom de l’équipe sur une page de ligue `rseqqca.com/ligue/<id>` (ex. `Accueil`) ; requis pour ce type d’URL | — |
 | `update_interval`   | Intervalle en secondes pour rafraîchir les données           | `3600` (1h)                               |
 | `mqtt_host`         | Hôte du broker MQTT                                         | `"core-mosquitto"`                        |
 | `mqtt_port`         | Port du broker MQTT                                         | `1883`                                    |

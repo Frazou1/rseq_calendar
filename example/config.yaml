@@ -1,6 +1,6 @@
 # https://developers.home-assistant.io/docs/add-ons/configuration#add-on-config
 name: RSEQ Team Calendar
-version: "1.3.9"
+version: "1.4.0"
 slug: rseq_team_calendar
 description: "Scrape le calendrier RSEQ d'une équipe ou de plusieurs équipes et publie le prochain match via MQTT (optionnel: création d'événements HA)."
 url: "https://github.com/Frazou1/rseq_calendar"
@@ -39,6 +39,7 @@ schema:
   teams:
     - name: str
       team_url: str
+      team_name: str?               # requis pour une page de ligue rseqqca.com (ex. "Accueil")
   team_url: str?                   # legacy
   update_interval: int(30,86400)
   mqtt_host: str

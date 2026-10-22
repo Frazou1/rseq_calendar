@@ -338,6 +338,134 @@ def extract_standings_rows(page_html: str) -> List[Dict]:
     return rows
 
 
+# ---------- Nouveau site RSEQ-QCA (rseqqca.com/ligue/<id>), saison 2026-2027 ----------
+# Page HTML rendue cote serveur (aucun JavaScript requis) : une seule page par LIGUE, donc on filtre
+# les matchs de l'equipe demandee (option team_name). Contenu en UTF-8 (repli Windows-1252).
+# New RSEQ-QCA site: one server-rendered page per LEAGUE; games are filtered on team_name.
+
+MOIS_FR = {"janvier": 1, "fevrier": 2, "mars": 3, "avril": 4, "mai": 5, "juin": 6, "juillet": 7,
+           "aout": 8, "septembre": 9, "octobre": 10, "novembre": 11, "decembre": 12}
+
+
+def _norm(txt: str) -> str:
+    """Minuscules sans accents ni espaces superflus / lowercase, no accents, single spaces."""
+    import unicodedata
+    t = unicodedata.normalize("NFKD", txt or "").encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"\s+", " ", t).strip().lower()
+
+
+def is_league_url(url: str) -> bool:
+    return "rseqqca.com/ligue/" in (url or "").lower()
+
+
+def fetch_league_html(url: str) -> str:
+    r = requests.get(url, timeout=30, headers={
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+        "Accept-Language": "fr-CA,fr;q=0.9"})
+    r.raise_for_status()
+    # UTF-8 attendu ; repli Windows-1252 au cas ou / UTF-8 expected, cp1252 fallback just in case
+    try:
+        return r.content.decode("utf-8")
+    except UnicodeDecodeError:
+        return r.content.decode("cp1252")
+
+
+def parse_league_datetime(txt: str) -> Tuple[str, str, str, Optional[datetime]]:
+    """« Mar 27 octobre 2026 17:45 » -> (jour, date ISO, heure, datetime)."""
+    m = re.search(r"(\w+)\.?\s+(\d{1,2})\s+([A-Za-zéûÉÛ]+)\s+(\d{4})(?:\s+(\d{1,2})[:h](\d{2}))?", txt or "")
+    if not m:
+        return "", "", "", None
+    jour, j, mois, an, hh, mm = m.groups()
+    mois_n = MOIS_FR.get(_norm(mois))
+    if not mois_n:
+        return jour, "", "", None
+    dt = datetime(int(an), mois_n, int(j), int(hh or 0), int(mm or 0))
+    return jour, dt.strftime("%Y-%m-%d"), (f"{int(hh):02d}:{mm}" if hh else ""), dt
+
+
+def extract_league_calendar(page_html: str, team_name: str) -> List[Dict]:
+    """Matchs de l'equipe dans ul.parties.desktop : n° - date, visiteur, score, score, receveur, lieu.
+    Games of the team in ul.parties.desktop (the .mobile copy is ignored)."""
+    soup = BeautifulSoup(page_html, "html.parser")
+    cible = _norm(team_name)
+    rows: List[Dict] = []
+    for ul in soup.select("ul.parties.desktop"):
+        titre = ul.find_previous_sibling("h2")
+        phase = titre.get_text(strip=True) if titre else ""
+        for li in ul.find_all("li", recursive=False):
+            blocs = li.find_all("div", recursive=False)
+            if len(blocs) < 2:
+                continue
+            entete = blocs[0].get_text(" ", strip=True)
+            no = (re.match(r"\s*(\d+)", entete) or [None, ""])[1]
+            jour, date_iso, heure, dt = parse_league_datetime(entete)
+            equipes = [d.get_text(strip=True) for d in blocs[1].select("div.equipe")]
+            scores = [d.get_text(strip=True) for d in blocs[1].select("div.score")]
+            if len(equipes) < 2:
+                continue
+            visitor, home = equipes[0], equipes[1]
+            if cible not in (_norm(visitor), _norm(home)):
+                continue
+            result = f"{scores[0]} - {scores[1]}" if len(scores) >= 2 and all(re.search(r"\d", s) for s in scores[:2]) else ""
+            lien = blocs[1].find("a")
+            venue = lien.get_text(strip=True) if lien else ""
+            row = {
+                "no": no, "jour": jour, "date": date_iso, "time": heure,
+                "datetime": to_local_iso(dt) if dt else None,
+                "visitor": visitor, "result": result, "home": home, "venue": venue,
+                "phase": phase,
+            }
+            rows.append(row)
+            print(f"[DEBUG] Row parsed: {date_iso} {heure} | {visitor} @ {home} | result={result}")
+    return rows
+
+
+def extract_league_standings(page_html: str) -> List[Dict]:
+    """Premier ul.classement.desktop : Pos, Équipe, MJ, V, D, N, PP, PC, MOY, PE, PT.
+    Memes cles que l'ancien tableau (PE -> PES, PT -> PTS) / same keys as the old table."""
+    soup = BeautifulSoup(page_html, "html.parser")
+    ul = soup.select_one("ul.classement.desktop")
+    if not ul:
+        return []
+    entete = ul.select_one("li.header2")
+    if not entete:
+        return []
+    cles = {"pos": "pos", "equipe": "team", "mj": "MJ", "v": "V", "d": "D", "n": "N", "pp": "PP",
+            "pc": "PC", "moy": "MOY", "pe": "PES", "pt": "PTS", "pts": "PTS"}
+    colonnes = [cles.get(_norm(d.get_text(strip=True))) for d in entete.find_all("div", recursive=False)]
+    rows: List[Dict] = []
+    for li in ul.find_all("li", recursive=False):
+        if li is entete:
+            continue
+        vals = [d.get_text(strip=True) for d in li.find_all("div", recursive=False)]
+        entry = {k: "" for k in ["pos", "team", "MJ", "V", "D", "N", "PP", "PC", "MOY", "PES", "PTS"]}
+        for k, v in zip(colonnes, vals):
+            if k:
+                entry[k] = v
+        if entry["team"]:
+            rows.append(entry)
+    return rows
+
+
+def scrape_league_team(league_url: str, team_name: str) -> Tuple[List[Dict], List[Dict]]:
+    print(f"[SCRIPT] Ouverture (page de ligue): {league_url} | équipe: {team_name}")
+    html = fetch_league_html(league_url)
+    rows = extract_league_calendar(html, team_name)
+    standings = extract_league_standings(html)
+    if not rows:
+        try:
+            os.makedirs("/share", exist_ok=True)
+            with open("/share/rseq_last.html", "w", encoding="utf-8") as f:
+                f.write(html)
+            print(f"[SCRIPT] Aucun match pour « {team_name} » — snapshot /share/rseq_last.html écrit.")
+        except Exception as e:
+            print(f"[SCRIPT] Dump HTML impossible: {e}")
+    print(f"[SCRIPT] {len(rows)} lignes de calendrier détectées.")
+    print(f"[SCRIPT] {len(standings)} lignes de standings détectées.")
+    return rows, standings
+
+
 def scrape_team_calendar(team_url: str, driver: webdriver.Chrome) -> Tuple[List[Dict], List[Dict]]:
     print(f"[SCRIPT] Ouverture: {team_url}")
     driver.get(team_url)
@@ -536,8 +664,11 @@ def main():
         print(f"[ERREUR] MQTT: {e}")
         return
 
-    # Driver Selenium unique pour toutes les équipes (dans ce run)
-    driver = build_driver()
+    # Driver Selenium seulement si une équipe utilise encore l'ancien site diffusion.rseq.ca.
+    # Selenium driver only if a team still uses the old diffusion.rseq.ca site.
+    driver = None
+    if any(t.get("team_url") and not is_league_url(t.get("team_url")) for t in teams):
+        driver = build_driver()
 
     # Persistance événements
     last = load_last_events()
@@ -559,8 +690,15 @@ def main():
             upcoming: List[Dict] = []
             standings: List[Dict] = []
 
+            rows: List[Dict] = []
             try:
-                rows, standings = scrape_team_calendar(url, driver)
+                if is_league_url(url):
+                    team_name = (team.get("team_name") or "").strip()
+                    if not team_name:
+                        raise RuntimeError("team_name requis pour une page de ligue rseqqca.com")
+                    rows, standings = scrape_league_team(url, team_name)
+                else:
+                    rows, standings = scrape_team_calendar(url, driver)
                 ng, up = find_next_and_upcoming(rows)
                 next_game = ng
                 upcoming = up
@@ -671,7 +809,8 @@ def main():
 
     finally:
         try:
-            driver.quit()
+            if driver:
+                driver.quit()
         except Exception:
             pass
         client.loop_stop()
