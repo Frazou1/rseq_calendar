@@ -803,6 +803,16 @@ def main():
                     f"RSEQ – Dernier match ({name})", device_name, "mdi:basketball",
                     state_str, attributes
                 )
+            elif rows:
+                # Calendrier lu correctement mais aucun match encore joue (debut de saison) : on remplace
+                # le dernier match retenu de la saison precedente. Page en echec (rows vide) : on ne touche a rien.
+                # Calendar read OK but no game played yet: replace last season's retained value.
+                mqtt_discovery_publish(
+                    client, DISCOVERY_PREFIX, f"{entity_prefix}_{slug}_last_game",
+                    f"RSEQ – Dernier match ({name})", device_name, "mdi:basketball",
+                    "Aucun match joué", {"team": name, "team_url": url, "last_game": None,
+                                          "updated": now_local().isoformat()}
+                )
 
         # ✅ Fin de la boucle for
         print("[SCRIPT] Tous les teams traités.")

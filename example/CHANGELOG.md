@@ -1,5 +1,10 @@
 <!-- https://developers.home-assistant.io/docs/add-ons/presentation#keeping-a-changelog -->
 
+## 1.4.1
+
+- « Dernier match » : affiche « Aucun match joué » en début de saison (calendrier lu, aucun résultat)
+  au lieu du dernier match de la saison précédente. Si la page échoue, le capteur n'est pas modifié.
+
 ## 1.4.0
 
 - Nouveau site RSEQ-QCA (saison 2026-2027) : `team_url` peut être une page de ligue
