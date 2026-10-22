@@ -754,6 +754,8 @@ def main():
                 "team_url": url,
                 "next_game": next_game,
                 "upcoming": upcoming,
+                # Calendrier complet (joues + a venir) pour la vue Basket / full schedule for the Basket view
+                "matchs": sorted(rows, key=lambda r: r.get("datetime") or ""),
                 "updated": now_local().isoformat()
             }
             sensor_id_next = f"{entity_prefix}_{slug}_next_game"
