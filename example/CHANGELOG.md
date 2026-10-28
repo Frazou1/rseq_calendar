@@ -1,5 +1,10 @@
 <!-- https://developers.home-assistant.io/docs/add-ons/presentation#keeping-a-changelog -->
 
+## 1.5.0
+
+- Rythme adaptatif les jours de match : réveil au début du match, toutes les 10 min pendant le match
+  (jusqu'au résultat, 4 h au plus), toutes les heures pendant 3 h après, puis l'intervalle normal.
+
 ## 1.4.2
 
 - Capteur « Prochain match » : nouvel attribut `matchs` (calendrier complet de l'équipe, joués et à venir).

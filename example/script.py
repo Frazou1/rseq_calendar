@@ -672,6 +672,7 @@ def main():
 
     # Persistance événements
     last = load_last_events()
+    tous_les_matchs: List[Dict] = []   # pour le rythme adaptatif / for the adaptive rhythm
 
     try:
         for team in teams:
@@ -707,6 +708,8 @@ def main():
             except Exception as e:
                 status = f"error: {e}"
                 print(f"[SCRIPT] ERREUR[{name}]: {e}")
+
+            tous_les_matchs.extend(rows)
 
             # Event HA optionnel (anti-doublon par équipe)
             if next_game and HA_URL and HA_TOKEN and HA_CALENDAR_ENTITY:
@@ -818,6 +821,20 @@ def main():
 
         # ✅ Fin de la boucle for
         print("[SCRIPT] Tous les teams traités.")
+
+        # Rythme adaptatif les jours de match : delai ecrit pour run.sh / adaptive rhythm, delay written for run.sh
+        try:
+            import rythme
+            tz = ZoneInfo(LOCAL_TZ)
+            attente, raison = rythme.delai(
+                [(f"{r.get('no')}|{r.get('datetime')}", rythme.lire_iso(r.get("datetime"), tz),
+                  bool(re.search(r"\d", r.get("result") or ""))) for r in tous_les_matchs],
+                int(os.getenv("UPDATE_INTERVAL", "3600")))
+            with open("/data/prochain_delai", "w") as f:
+                f.write(str(attente))
+            print(f"[SCRIPT] Prochaine mise à jour dans {attente / 60:.0f} min ({raison}).")
+        except Exception as e:
+            print(f"[SCRIPT] Rythme adaptatif indisponible: {e}")
 
     finally:
         try:

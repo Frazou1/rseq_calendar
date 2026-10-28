@@ -52,6 +52,7 @@ echo "$TEAMS_JSON" | jq -r '.[] | "- \(.name) -> \(.team_url)\(if .team_name the
 # Facultatif : Flags Chromium headless (si tu veux les injecter au script)
 export CHROMIUM_FLAGS="${CHROMIUM_FLAGS:---headless=new --no-sandbox --disable-dev-shm-usage --disable-gpu --window-size=1920,1080}"
 
+export UPDATE_INTERVAL
 while true; do
   echo "[INFO] Exécution du script Python…"
   python3 /script.py \
@@ -66,6 +67,10 @@ while true; do
     --ha_token "$HA_TOKEN" \
     --ha_calendar_entity "$HA_CALENDAR_ENTITY"
 
-  echo "[INFO] Attente ${UPDATE_INTERVAL}s…"
-  sleep "$UPDATE_INTERVAL"
+  # Delai calcule par le script (rythme adaptatif les jours de match), sinon l'intervalle normal.
+  # Delay computed by the script (adaptive rhythm on game days), else the normal interval.
+  ATTENTE="$(cat /data/prochain_delai 2>/dev/null || echo "$UPDATE_INTERVAL")"
+  [[ "$ATTENTE" =~ ^[0-9]+$ ]] || ATTENTE="$UPDATE_INTERVAL"
+  echo "[INFO] Attente ${ATTENTE}s…"
+  sleep "$ATTENTE"
 done

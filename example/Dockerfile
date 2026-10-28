@@ -42,6 +42,7 @@ WORKDIR /app
 # --- Copie des fichiers de l’add-on ---
 COPY run.sh /run.sh
 COPY script.py /script.py
+COPY rythme.py /rythme.py
 RUN chmod a+x /run.sh
 
 # Si tu veux, tu peux ajouter un HEALTHCHECK plus tard (exige curl/wget)
