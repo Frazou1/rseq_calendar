@@ -607,6 +607,9 @@ def format_standings_for_card(standings: List[Dict]) -> Dict:
     }
 
 
+REESSAI_ECHEC = 1800   # s, delai apres une page en echec / delay after a failed page
+
+
 def main():
     parser = argparse.ArgumentParser()
     # Nouveau: multi-équipes via JSON compact
@@ -673,6 +676,7 @@ def main():
     # Persistance événements
     last = load_last_events()
     tous_les_matchs: List[Dict] = []   # pour le rythme adaptatif / for the adaptive rhythm
+    echec = False   # au moins une page en echec / at least one failed page
 
     try:
         for team in teams:
@@ -745,6 +749,16 @@ def main():
                 f"RSEQ – Statut ({name})", device_name, "mdi:information",
                 status, {"team_url": url, "last_updated": now_local().isoformat()}
             )
+
+            # Page en echec (erreur ou aucun match lu, ex. page sans calendrier vers 23 h) : on garde les
+            # dernieres valeurs publiees (messages MQTT retenus) au lieu de publier une liste vide ;
+            # seul le statut change, et on reessaie plus tot.
+            # Failed page (error or no game read): keep the last published (retained) values instead of
+            # publishing an empty list; only the status changes, and we retry sooner.
+            if not rows:
+                echec = True
+                print(f"[SCRIPT] Page sans calendrier pour '{name}' : capteurs conservés.")
+                continue
 
             # 2) prochain match
             if next_game:
@@ -830,6 +844,9 @@ def main():
                 [(f"{r.get('no')}|{r.get('datetime')}", rythme.lire_iso(r.get("datetime"), tz),
                   bool(re.search(r"\d", r.get("result") or ""))) for r in tous_les_matchs],
                 int(os.getenv("UPDATE_INTERVAL", "3600")))
+            if echec and attente > REESSAI_ECHEC:
+                # Nouvel essai dans 30 min / retry in 30 min
+                attente, raison = REESSAI_ECHEC, "nouvel essai après une page sans calendrier"
             with open("/data/prochain_delai", "w") as f:
                 f.write(str(attente))
             print(f"[SCRIPT] Prochaine mise à jour dans {attente / 60:.0f} min ({raison}).")

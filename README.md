@@ -1,6 +1,6 @@
 # RSEQ Team Calendar — module complémentaire Home Assistant / Home Assistant add-on
 
-![Version](https://img.shields.io/badge/version-1.5.0-blue.svg)
+![Version](https://img.shields.io/badge/version-1.5.1-blue.svg)
 ![Home Assistant](https://img.shields.io/badge/Home%20Assistant-add--on-41BDF5.svg)
 ![Licence](https://img.shields.io/badge/licence-Apache%202.0-green.svg)
 

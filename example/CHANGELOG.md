@@ -1,5 +1,11 @@
 <!-- https://developers.home-assistant.io/docs/add-ons/presentation#keeping-a-changelog -->
 
+## 1.5.1
+
+- Page sans calendrier (le site RSEQ-QCA renvoie parfois une page vide, notamment vers 23 h) : les capteurs
+  « Prochain match » et « Classement » gardent leurs dernières valeurs au lieu de passer à « Aucun match à
+  venir » ; seul le statut indique l'erreur, et un nouvel essai a lieu 30 min plus tard.
+
 ## 1.5.0
 
 - Rythme adaptatif les jours de match : réveil au début du match, toutes les 10 min pendant le match
